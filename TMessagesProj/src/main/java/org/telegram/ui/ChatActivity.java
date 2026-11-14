@@ -46379,10 +46379,26 @@ public class ChatActivity extends BaseFragment implements
         final int account = currentAccount;
         boolean enabled = AliGramPreservation.isOptedIn(account, did);
         AliGramPreservation.Activation act = AliGramPreservation.getActivation(account, did);
+        // O-01 (Phase 3.2): exactly one body text. The ON text is shown
+        // only when STAMPED; while PENDING the pending notice stands alone
+        // (no "Preservation is ON…" above it), and the positive button
+        // reads "Cancel activation" — nothing is being preserved yet, so
+        // "Disable preservation" would misdescribe the action. The toggle
+        // itself is unchanged: it still just flips the opt-in flag.
+        AliGramEligibility.PreservationDialogState dialogState =
+                AliGramEligibility.resolvePreservationDialogState(enabled, act.state);
         StringBuilder message = new StringBuilder();
-        message.append(getString(enabled ? R.string.AliGramPreservationEnabled : R.string.AliGramPreservationDisabled));
-        if (enabled && act.state == AliGramEligibility.ActivationState.PENDING) {
-            message.append("\n\n").append(getString(R.string.AliGramPreservationPending));
+        switch (dialogState) {
+            case ENABLED:
+                message.append(getString(R.string.AliGramPreservationEnabled));
+                break;
+            case PENDING:
+                message.append(getString(R.string.AliGramPreservationPending));
+                break;
+            case DISABLED:
+            default:
+                message.append(getString(R.string.AliGramPreservationDisabled));
+                break;
         }
         if (stats != null && stats[0] > 0) {
             message.append("\n\n").append(LocaleController.formatString(R.string.AliGramPreservationStats, stats[0], AndroidUtilities.formatFileSize(stats[2])));
@@ -46390,7 +46406,20 @@ public class ChatActivity extends BaseFragment implements
         AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
         builder.setTitle(getString(R.string.AliGramPreservationTitle));
         builder.setMessage(message.toString());
-        builder.setPositiveButton(getString(enabled ? R.string.AliGramPreservationDisable : R.string.AliGramPreservationEnable), (dialogInterface, i) -> {
+        final int positiveRes;
+        switch (dialogState) {
+            case ENABLED:
+                positiveRes = R.string.AliGramPreservationDisable;
+                break;
+            case PENDING:
+                positiveRes = R.string.AliGramPreservationCancelActivation;
+                break;
+            case DISABLED:
+            default:
+                positiveRes = R.string.AliGramPreservationEnable;
+                break;
+        }
+        builder.setPositiveButton(getString(positiveRes), (dialogInterface, i) -> {
             boolean nowEnabled = AliGramPreservation.togglePreservation(account, did);
             BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(nowEnabled ? R.string.AliGramPreservationEnabledToast : R.string.AliGramPreservationDisabledToast)).show();
         });

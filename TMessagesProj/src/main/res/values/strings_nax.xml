@@ -293,6 +293,10 @@
     <string name="AliGramPreservationStats">%1$d preserved items, %2$s stored in this chat</string>
     <string name="AliGramPreservationEnable">Enable preservation</string>
     <string name="AliGramPreservationDisable">Disable preservation</string>
+    <!-- O-01 (Phase 3.2): positive button while activation is PENDING — nothing is
+         preserved yet, so this cancels the pending activation rather than disabling
+         an active feature. The toggle action itself is unchanged. -->
+    <string name="AliGramPreservationCancelActivation">Cancel activation</string>
     <string name="AliGramPreservationClear">Clear preserved media</string>
     <string name="AliGramPreservationClearConfirm">Delete all media preserved by AliGram in this chat? Preservation stays enabled and will keep preserving new media.</string>
     <string name="AliGramPreservedCleared">Preserved media cleared</string>

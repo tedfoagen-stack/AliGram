@@ -112,7 +112,12 @@ public final class AliGramFileCopy {
                 return new CopyResult(false, null, null, null, 0, AliGramEligibility.REASON_NO_SPACE);
             }
         } catch (Throwable e) {
-            FileLog.e("AliGram: StatFs failed, continuing without headroom check", e);
+            // O-03 (Phase 3.2): the fail-safe itself is unchanged — the copy
+            // still proceeds — but the log must say so explicitly: there is
+            // now NO headroom check, and the mid-copy ENOSPC handling is
+            // the only remaining guard. Context (blob dir, source file,
+            // failure cause) is included so the line is actionable.
+            FileLog.e("AliGram: StatFs failed for blob dir " + dir.getAbsolutePath() + " while copying " + source.getAbsolutePath() + " (" + e + ") — continuing UNGUARDED with no headroom check; the mid-copy ENOSPC handling is the only remaining guard", e);
         }
 
         File tempFile = new File(dir, finalFileName + ".tmp-" + refId);

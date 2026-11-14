@@ -72,6 +72,43 @@ public final class AliGramEligibility {
         STAMPED
     }
 
+    /**
+     * Which wording the preservation dialog shows (O-01, Phase 3.2).
+     *
+     * <p>The old dialog appended the "Preservation is ON…" text even while
+     * {@link ActivationState#PENDING}, then added the pending notice — the
+     * two sentences contradicted each other, and the positive button read
+     * "Disable preservation" while nothing was being preserved yet.
+     * Exactly one body text is shown now: the ON text only when STAMPED,
+     * the pending notice alone while PENDING, the OFF text when opted out.
+     */
+    public enum PreservationDialogState {
+        /** Opted out: show the OFF text, positive button enables. */
+        DISABLED,
+        /** Opted in but not yet stamped: show only the pending notice. */
+        PENDING,
+        /** Opted in and stamped: show the ON text, positive button disables. */
+        ENABLED
+    }
+
+    /**
+     * Pure dialog-state decision for
+     * {@code ChatActivity.showAliGramPreservationDialogInternal}.
+     *
+     * <p>A {@code null} activation state is treated as PENDING (never show
+     * the ON text without a proven stamp). The opt-out wins over the
+     * activation state: a disabled chat is DISABLED even if a stale
+     * STAMPED record is still on disk.
+     */
+    public static PreservationDialogState resolvePreservationDialogState(boolean enabled, ActivationState state) {
+        if (!enabled) {
+            return PreservationDialogState.DISABLED;
+        }
+        return state == ActivationState.STAMPED
+                ? PreservationDialogState.ENABLED
+                : PreservationDialogState.PENDING;
+    }
+
     // ------------------------------------------------------------------
     // Activation boundary (Phase 2.3 §1).
     // ------------------------------------------------------------------

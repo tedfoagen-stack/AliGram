@@ -36,8 +36,14 @@ public class LauncherIconController {
     // --- AliGram: a single launcher icon. The Nagram icon variants were
     // removed from the manifest (BRANDING.md); the selector therefore
     // offers only the original AliGram icon.
+    // O-02 (Phase 3.2): background/foreground are the adaptive-icon layers
+    // (the same pair mipmap-anydpi-v26/ic_launcher_aligram.xml uses),
+    // NOT the full icon twice — AppIconsSelectorCell renders background
+    // via setImageResource and foreground via setForeground, so passing
+    // the full icon for both showed it doubled, layered. The manifest
+    // icon itself is untouched.
     public enum LauncherIcon {
-        DEFAULT("DefaultIcon", R.mipmap.ic_launcher_aligram, R.mipmap.ic_launcher_aligram, R.string.AppIconDefault);
+        DEFAULT("DefaultIcon", R.drawable.ic_launcher_aligram_background, R.drawable.ic_launcher_aligram_foreground, R.string.AppIconDefault);
 
         public final String key;
         public final int background;
