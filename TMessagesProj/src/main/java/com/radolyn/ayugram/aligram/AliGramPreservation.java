@@ -885,7 +885,14 @@ public final class AliGramPreservation {
             if (dao == null) {
                 return;
             }
-            List<PreservedRef> claimed = dao.claimJobsForFile(account, fileName);
+            AliGramDatabase db = AliGramData.getDatabase();
+            if (db == null) {
+                return; // cannot claim without the database handle
+            }
+            // Phase 3.2 (§11.6): the claim must run in one transaction —
+            // Room ignores @Transaction on the DAO default method, so the
+            // transaction is provided by PreservedRefDao.claimJobsInTransaction.
+            List<PreservedRef> claimed = PreservedRefDao.claimJobsInTransaction(db, account, fileName);
             if (claimed == null || claimed.isEmpty()) {
                 return; // lookup-only: no waiting job ⇒ no-op
             }

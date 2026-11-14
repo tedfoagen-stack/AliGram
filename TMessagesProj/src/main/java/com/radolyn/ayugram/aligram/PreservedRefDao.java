@@ -118,10 +118,15 @@ public interface PreservedRefDao {
 
     /**
      * Fan-out claim (Phase 2.2 §1.7): move every waiting row for one file to
-     * COPYING in a single transaction; the caller then copies once and binds
-     * per job. A second delivery finds no waiting rows and is a no-op.
+     * COPYING; the caller then copies once and binds per job. A second delivery finds no waiting rows and is a no-op.
+     *
+     * <p>NOT transactional by itself: Room 2.8.4 ignores {@code @Transaction}
+     * on DAO {@code default} methods — proven by scenario 12 (Phase 3.2):
+     * the standalone claim's first UPDATE committed in autocommit and the
+     * rollback assertion failed. Callers MUST use
+     * {@link #claimJobsInTransaction} — never call this method directly
+     * outside a {@code runInTransaction} block.
      */
-    @Transaction
     default List<PreservedRef> claimJobsForFile(int accountId, String expectedFileName) {
         List<PreservedRef> jobs = getWaitingJobsForFile(accountId, expectedFileName);
         for (PreservedRef job : jobs) {
@@ -130,6 +135,19 @@ public interface PreservedRefDao {
             updateRef(job);
         }
         return jobs;
+    }
+
+    /**
+     * Transactional fan-out claim — the ONLY way to call
+     * {@link #claimJobsForFile}.
+     *
+     * <p>The transaction is provided here, by the caller, via
+     * {@code runInTransaction}, because the {@code @Transaction}
+     * annotation on the {@code default} method is ignored by Room
+     * (see above). Every caller must go through this helper.
+     */
+    static List<PreservedRef> claimJobsInTransaction(AliGramDatabase db, int accountId, String expectedFileName) {
+        return db.runInTransaction(() -> db.preservedRefDao().claimJobsForFile(accountId, expectedFileName));
     }
 
     /** Next EDIT revisionSeq for a message, assigned in one transaction. */
