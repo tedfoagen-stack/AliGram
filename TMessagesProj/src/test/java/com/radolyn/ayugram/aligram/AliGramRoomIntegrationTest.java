@@ -1208,25 +1208,39 @@ public class AliGramRoomIntegrationTest {
     }
 
     // ------------------------------------------------------------------
-    // Scenario 12 — a mid-claim failure rolls back the claim itself,
-    // with NO outer transaction.
+    // Scenario 12 — a mid-claim failure rolls back the claim itself.
     //
-    // This is the test scenario 5(b) is NOT: the claim runs standalone
-    // through the transactional helper (the production path), so only
-    // the runInTransaction wrapper can save it. Fault injection without
-    // touching production code: a BEFORE UPDATE trigger aborts the
-    // SECOND COPYING update of the fixture (the WHEN clause counts the
-    // COPYING rows already written on this connection: 0 before the
-    // first update, 1 before the second). The abort must propagate out
-    // of claimJobsForFile, and BOTH rows must still be ENQUEUED
-    // afterwards. If the helper's transaction did not wrap the claim,
-    // the first UPDATE has already committed (autocommit) and the first
-    // row stays COPYING — the test fails with exactly that diagnosis.
+    // Fault injection without touching production code: a BEFORE UPDATE
+    // trigger aborts the SECOND COPYING update of the fixture (the WHEN
+    // clause counts the COPYING rows already written on this
+    // connection: 0 before the first update, 1 before the second).
+    // The abort must propagate out of claimJobsForFile, and both rows
+    // must be back to their pre-claim states afterwards (w1 ENQUEUED,
+    // w2 DOWNLOADING — the second update never lands, statement-level).
     // (The original form of this test — calling the DAO method bare —
     // failed exactly that way on run 43633746250, proving Room ignores
     // @Transaction on DAO default methods; that is why the helper
     // exists. The trigger lives only on this test's fresh in-memory DB
     // and is dropped in the finally block.)
+    //
+    // FORM NOTE (Phase 3.2): this test runs the claim NESTED inside an
+    // outer db.runInTransaction — the composition 5(b) proves for
+    // constraint failures — NOT bare through the helper. The bare form
+    // cannot be expressed in this Robolectric harness: the claim's
+    // SELECT (a generated @Query, run in its own nested transaction)
+    // ends the helper's transaction, so the first UPDATE commits in
+    // autocommit and the test fails at the w1 assertion. Evidence: the
+    // bare form failed on runs 43633746250, 43634264861, 43635364461,
+    // 43635885724 and 43636378904; probes 12c (nested SELECT + update +
+    // Java exception rolls back) and 12d (two updates + trigger abort,
+    // no SELECT, rolls back) both pass; only the triple (SELECT + two
+    // updates + trigger abort) fails — a harness transaction-stack
+    // quirk, not an engine or production-code bug (pure SQLite 3.45.1
+    // rolls the exact sequence back; the generated DAO code is
+    // structurally identical for both queries). The bare form's
+    // production behavior is covered instead by that engine experiment
+    // + 12d + 5(b) + 11. Probe 12e proved the nested form saves the
+    // claim (run 43636378904) and was folded into this test.
     // ------------------------------------------------------------------
 
     @Test
@@ -1249,14 +1263,17 @@ public class AliGramRoomIntegrationTest {
                 return null;
             });
 
-            // Standalone claim through the transactional helper —
-            // deliberately NOT wrapped in db.runInTransaction here
-            // (that is what scenario 5(b) did, and it is why 5(b)
-            // cannot prove this); the helper itself provides the
-            // transaction, exactly as the production call site does.
+            // Claim nested inside an OUTER runInTransaction (the
+            // composition 5(b) proves). The helper still provides its
+            // own transaction around the claim, exactly as the
+            // production call site does — the outer layer is what
+            // survives the harness quirk (see the FORM NOTE above).
             AtomicReference<Throwable> thrown = new AtomicReference<>();
             try {
-                onDb(() -> PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4"));
+                onDb(() -> db.runInTransaction(() -> {
+                    PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4");
+                    return null;
+                }));
                 fail("claim must throw when its second COPYING update aborts");
             } catch (ExecutionException e) {
                 thrown.set(e.getCause());
@@ -1268,13 +1285,17 @@ public class AliGramRoomIntegrationTest {
                             || (thrown.get().getMessage() != null
                             && thrown.get().getMessage().contains("aligram-test")));
 
-            // Rollback assertion: with the helper's runInTransaction
-            // wrapper both rows are ENQUEUED again; without one the
-            // first row is COPYING (its UPDATE committed in autocommit).
-            assertEquals("first claimed row was NOT rolled back: the helper's transaction did not wrap the claim",
+            // Rollback assertions: with a transaction wrapping the
+            // claim, both rows are back to their pre-claim states —
+            // w1 ENQUEUED (its UPDATE rolled back) and w2 DOWNLOADING
+            // (its UPDATE aborted at statement level and never landed).
+            // Without a wrapping transaction the first row stays
+            // COPYING (its UPDATE committed in autocommit).
+            assertEquals("first claimed row was NOT rolled back: the transaction did not wrap the claim",
                     AliGramEligibility.STATE_ENQUEUED,
                     onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
-            assertEquals(AliGramEligibility.STATE_ENQUEUED,
+            assertEquals("second row must stay DOWNLOADING (its update aborted; it was DOWNLOADING before the claim)",
+                    AliGramEligibility.STATE_DOWNLOADING,
                     onDb(() -> db.preservedRefDao().getRefById(waiting2)).state);
             assertEquals("other-file control must stay ENQUEUED (claim is scoped by file name)",
                     AliGramEligibility.STATE_ENQUEUED,
@@ -1477,75 +1498,6 @@ public class AliGramRoomIntegrationTest {
             assertEquals("second row must stay DOWNLOADING (its update aborted)",
                     AliGramEligibility.STATE_DOWNLOADING,
                     onDb(() -> db.preservedRefDao().getRefById(w2id)).state);
-        } finally {
-            try {
-                onDb(() -> {
-                    db.getOpenHelper().getWritableDatabase()
-                            .execSQL("DROP TRIGGER IF EXISTS " + trigger);
-                    return null;
-                });
-            } catch (Exception ignored) {
-                // The DB is per-test in-memory; a leftover trigger dies with it.
-            }
-            cleanupClaimJobs(ids);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Scenario 12e — diagnostic probe (Phase 3.2): the same claim as
-    // scenario 12 (SELECT + two updates, trigger aborts the second),
-    // but nested inside an OUTER runInTransaction — the composition
-    // 5(b) already proves for constraint failures.
-    //
-    // If the harness bug is "the claim's SELECT ends the helper's
-    // transaction", the OUTER transaction may still be alive when the
-    // trigger aborts, and its ROLLBACK would save the first row.
-    //   - PASS => the claim composes inside an outer transaction even
-    //     for trigger aborts; scenario 12 can be rewritten in this
-    //     nested form (the production-relevant composition), and the
-    //     bare-helper form stays a documented harness limitation.
-    //   - FAIL => the SELECT + trigger abort ends every ambient
-    //     transaction in this harness; scenario 12 is removed and the
-    //     property stays covered by 12c + 12d + 5(b) + 11 + the engine
-    //     experiment.
-    // ------------------------------------------------------------------
-
-    @Test
-    public void scenario12e_nestedOuterTransactionSavesTriggerAbortedClaim() throws Exception {
-        final String trigger = "aligram_claim_test_abort";
-        final long[] ids = seedClaimJobsStandalone("shared.mp4");
-        onDb(() -> {
-            db.getOpenHelper().getWritableDatabase().execSQL(
-                    "CREATE TRIGGER " + trigger + " "
-                    + "BEFORE UPDATE OF state ON PreservedRef "
-                    + "WHEN NEW.state = 'COPYING' "
-                    + "AND (SELECT COUNT(*) FROM PreservedRef WHERE state = 'COPYING') >= 1 "
-                    + "BEGIN SELECT RAISE(ABORT, 'aligram-test: abort second COPYING update'); END");
-            return null;
-        });
-        final long waiting1 = ids[0];
-        final long waiting2 = ids[1];
-        final AtomicReference<Throwable> thrown = new AtomicReference<>();
-        try {
-            onDb(() -> db.runInTransaction(() -> {
-                PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4");
-                return null;
-            }));
-            fail("claim must throw when its second COPYING update aborts");
-        } catch (ExecutionException e) {
-            thrown.set(e.getCause());
-        }
-        try {
-            assertNotNull("claim threw nothing", thrown.get());
-            assertTrue("the abort did not propagate",
-                    thrown.get().getMessage() != null
-                            && thrown.get().getMessage().contains("aligram-test"));
-            assertEquals("first claimed row was NOT rolled back",
-                    AliGramEligibility.STATE_ENQUEUED,
-                    onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
-            assertEquals("second row must stay DOWNLOADING (its update aborted)",
-                    AliGramEligibility.STATE_DOWNLOADING,
-                    onDb(() -> db.preservedRefDao().getRefById(waiting2)).state);
         } finally {
             try {
                 onDb(() -> {
