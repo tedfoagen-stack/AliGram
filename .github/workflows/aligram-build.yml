@@ -69,6 +69,33 @@ jobs:
           APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
           APK=$(dirname $APK)
           echo "APK=$APK" >> $GITHUB_ENV
+      - name: Crashlytics mapping-upload guard
+        # Phase 3.2 (§11.7): prove the debug build never uploads a
+        # Crashlytics mapping. The dry-run lists every task that would
+        # execute; the upload task must not be among them. The second
+        # command documents which Crashlytics tasks exist at all.
+        run: |
+          set -euo pipefail
+          ./gradlew TMessagesProj:assembleDebug --dry-run > /tmp/aligram-dryrun.txt
+          if grep -q "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt; then
+            echo "FAIL: Crashlytics mapping upload task is in the debug build graph:"
+            grep "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt
+            exit 1
+          fi
+          echo "OK: no Crashlytics mapping-upload task in the debug build graph."
+          ./gradlew TMessagesProj:tasks --all | grep -i "crashlytics" || echo "No Crashlytics tasks registered."
+      - name: Collect Room generated sources
+        # Phase 3.2 (§11.6): surface Room's generated DAO code so the
+        # claimJobsForFile @Transaction wrapping can be read directly.
+        run: |
+          echo "Room-generated DAO implementations for the AliGram package:"
+          find TMessagesProj/build/generated -name '*Dao_Impl.java' -path '*aligram*' -print || true
+      - name: Upload Room generated sources
+        uses: actions/upload-artifact@v7
+        with:
+          name: AliGram-Room-Generated
+          path: TMessagesProj/build/generated/ap_generated_sources/**/com/radolyn/ayugram/aligram/*Dao_Impl.java
+          if-no-files-found: warn
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
         with:
