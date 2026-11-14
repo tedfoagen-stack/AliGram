@@ -617,7 +617,27 @@ public final class AliGramPreservation {
                 }
             }
             if (ref.expectedFileName != null && !ref.expectedFileName.isEmpty()) {
-                pinnedNameMirror.remove(ref.expectedFileName);
+                // Phase 3.1 (D-02): the name mirror is shared by the fan-out
+                // refs for one file (LIVE + EDIT pin on the same download),
+                // so only clear it when NO other active ref still names the
+                // file — otherwise the cancelDownloading pin guard would
+                // miss a still-pinned freeze copy. Mirrors the path branch
+                // above, which already re-checks the DAO.
+                boolean stillNeeded = false;
+                if (dao != null) {
+                    List<PreservedRef> active = dao.getActiveRefsForFileName(ref.accountId, ref.expectedFileName);
+                    if (active != null) {
+                        for (PreservedRef other : active) {
+                            if (other.refId != ref.refId) {
+                                stillNeeded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!stillNeeded) {
+                    pinnedNameMirror.remove(ref.expectedFileName);
+                }
             }
         } catch (Throwable e) {
             FileLog.e(TAG + ": mirrorRemoveForRef failed", e);
@@ -835,8 +855,28 @@ public final class AliGramPreservation {
      * constructed before any ingest can run), and H-C is lookup-only: a
      * completion with no waiting row is a no-op (opening an old message
      * must never enrol it).
+     *
+     * <p>Phase 3.1 (D-01, RELEASE-BLOCKING): {@code DownloadController.
+     * didReceivedNotification} runs on the UI thread — the
+     * {@code fileLoaded}/{@code fileLoadFailed} notifications are posted
+     * via {@code AndroidUtilities.runOnUIThread} (ImageLoader's
+     * {@code fileDidLoaded}/{@code fileDidFailedLoad} delegate, and
+     * NotificationCenter delivers synchronously on the posting thread) —
+     * but this body does synchronous Room DAO, and the DB is deliberately
+     * built WITHOUT {@code allowMainThreadQueries()}, so every call threw
+     * {@code IllegalStateException} inside the catch-all and never
+     * claimed a job. The whole body therefore runs on
+     * {@code aligramCopyQueue}: this method only posts and returns.
      */
     public static void onFileLoaded(int account, String fileName, File file) {
+        try {
+            copyQueue.postRunnable(() -> onFileLoadedInternal(account, fileName, file));
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": onFileLoaded post failed", e);
+        }
+    }
+
+    private static void onFileLoadedInternal(int account, String fileName, File file) {
         try {
             if (fileName == null || !ensureInitialized(account)) {
                 return;
@@ -859,6 +899,10 @@ public final class AliGramPreservation {
                         job.sourceSize = file.length();
                         job.sourceMtime = file.lastModified();
                         dao.updateRef(job);
+                        // Phase 3.1 (D-04): the file just materialised —
+                        // refresh any PENDING deferred rows recorded with
+                        // 0,0 while it was still downloading.
+                        refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
                     }
                     mirrorPut(job);
                     final long refId = job.refId;
@@ -903,8 +947,25 @@ public final class AliGramPreservation {
         }
     }
 
-    /** fileLoadFailed wake-up: attempts budget + backoff retry; NO_SPACE has no retry loop. */
+    /**
+     * fileLoadFailed wake-up: attempts budget + backoff retry; NO_SPACE has no retry loop.
+     *
+     * <p>Phase 3.1 (D-01, RELEASE-BLOCKING): same UI-thread problem as
+     * {@link #onFileLoaded} — this body does synchronous Room DAO but was
+     * called from {@code DownloadController.didReceivedNotification} on
+     * the UI thread, so the failure signal was lost the same way (attempts
+     * never incremented, backoff never scheduled). Posted to
+     * {@code aligramCopyQueue} at entry; see there.
+     */
     public static void onFileLoadFailed(int account, String fileName, int canceled) {
+        try {
+            copyQueue.postRunnable(() -> onFileLoadFailedInternal(account, fileName, canceled));
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": onFileLoadFailed post failed", e);
+        }
+    }
+
+    private static void onFileLoadFailedInternal(int account, String fileName, int canceled) {
         try {
             if (fileName == null || !ensureInitialized(account)) {
                 return;
@@ -1017,6 +1078,10 @@ public final class AliGramPreservation {
      * {@code FileLoader.didFinishLoadingFile} (preload-finished early
      * return) and never publishes {@code fileLoaded}. The watchdog: (1)
      * reconcile — if the file is already complete on disk, copy directly;
+     * (1b, Phase 3.1 D-14) reconcile the operation's TEMP file too — a
+     * whole-file preload leaves the complete bytes in {@code <stem>.temp}
+     * with no final file, and the probe in (2) would re-swallow, so a
+     * temp file whose length equals the expected size is copied directly;
      * (2) otherwise re-issue {@code loadFile} as a probe (after the
      * swallow, the operation was removed from {@code loadOperationPaths},
      * so the probe creates a fresh operation whose already-exists path
@@ -1052,7 +1117,36 @@ public final class AliGramPreservation {
             job.state = AliGramEligibility.STATE_COPYING;
             dao.updateRef(job);
             mirrorPut(job);
+            // Phase 3.1 (D-04): the file just materialised — refresh any
+            // PENDING deferred rows recorded with 0,0.
+            refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
             copyForRef(refId, onDisk);
+            return;
+        }
+        // (1b) Phase 3.1 (D-14): the completed-preload swallow leaves the
+        // WHOLE file in the operation's temp file (<stem>.temp in
+        // MEDIA_DIR_CACHE) with no final file and no fileLoaded — and the
+        // probe in step (2) re-swallows, because a fresh operation's
+        // start() sees downloadedBytes == totalBytesCount and finishes
+        // with preload=true again. So a temp file whose length EQUALS
+        // the expected size is a complete source: copy from it directly.
+        // copyVerified still enforces size + SHA, so a partial temp is
+        // never bound. (A longer temp cannot happen for this attach — the
+        // temp name is per-attach — but == is used deliberately: the
+        // copy would reject a mismatch anyway.)
+        File tempSource = resolveTempSourceFile(job, load);
+        if (tempSource != null && tempSource.isFile() && job.expectedSize > 0
+                && tempSource.length() == job.expectedSize) {
+            FileLog.d(TAG + ": watchdog reconciled complete temp file on disk for ref " + refId
+                    + " (completed-preload swallow, D-14)");
+            job.sourcePath = tempSource.getAbsolutePath();
+            job.sourceSize = tempSource.length();
+            job.sourceMtime = tempSource.lastModified();
+            job.state = AliGramEligibility.STATE_COPYING;
+            dao.updateRef(job);
+            mirrorPut(job);
+            refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
+            copyForRef(refId, tempSource);
             return;
         }
         // (2) Probe: re-issue loadFile.
@@ -1080,6 +1174,30 @@ public final class AliGramPreservation {
         }
         if (job.sourcePath != null && !job.sourcePath.isEmpty()) {
             return new File(job.sourcePath);
+        }
+        return null;
+    }
+
+    /**
+     * Phase 3.1 (D-14): the operation's temp file for a job (see
+     * {@code FileLoader.getTempPathToAttach}). Only a plain {@code .temp}
+     * file is ever accepted here — never a {@code .temp.enc} (ciphertext
+     * must never be copied as a blob) and never a final file (step (1)
+     * already handles that). Returns null when there is no temp candidate.
+     */
+    private static File resolveTempSourceFile(PreservedRef job, PendingLoad load) {
+        try {
+            FileLoader loader = FileLoader.getInstance(job.accountId);
+            File temp = null;
+            if (load.photoSize != null) {
+                temp = loader.getTempPathToAttach(load.photoSize);
+            } else if (load.document != null) {
+                temp = loader.getTempPathToAttach(load.document);
+            }
+            if (temp != null && temp.getName().endsWith(".temp")) {
+                return temp;
+            }
+        } catch (Throwable ignored) {
         }
         return null;
     }
@@ -1151,8 +1269,18 @@ public final class AliGramPreservation {
             }
             return;
         }
-        // Dedupe at copy time: same (documentId|photoId, dcId, size, sha256) ⇒ reuse.
-        String blobId = AliGramEligibility.blobIdFor(job.documentId, job.photoId, job.dcId,
+        // Phase 3.1 (D-04): the copy succeeded, so the source is complete
+        // on disk with its final size/mtime — refresh any PENDING deferred
+        // rows recorded with 0,0 while it was still downloading, so the
+        // release after bind can pass decideRelease.
+        refreshDeferredForPath(source.getAbsolutePath(), source.length(), source.lastModified());
+        // Dedupe at copy time: same (accountId, documentId|photoId, dcId, size, sha256) ⇒ reuse.
+        // Phase 3.1 (D-05): the blob id AND the lookup are account-scoped —
+        // a global id/lookup bound a ref to a blob file in another
+        // account's directory (no file in this account's dir, render
+        // missed, UNAVAILABLE at startup, purge of the other account
+        // deleted the file under this ref).
+        String blobId = AliGramEligibility.blobIdFor(job.accountId, job.documentId, job.photoId, job.dcId,
                 result.size, result.sha256Hex);
         String ext = job.expectedFileName != null ? extensionOf(job.expectedFileName) : "";
         if (ext.isEmpty()) {
@@ -1161,20 +1289,20 @@ public final class AliGramPreservation {
         PreservedBlob existing = null;
         try {
             if (job.documentId != 0) {
-                existing = blobDao.getByDocumentKey(job.documentId, job.dcId, result.size, result.sha256Hex);
+                existing = blobDao.getByDocumentKey(job.accountId, job.documentId, job.dcId, result.size, result.sha256Hex);
             } else if (job.photoId != 0) {
-                existing = blobDao.getByPhotoKey(job.photoId, job.dcId, result.size, result.sha256Hex);
+                existing = blobDao.getByPhotoKey(job.accountId, job.photoId, job.dcId, result.size, result.sha256Hex);
             }
         } catch (Throwable ignored) {
         }
         if (existing != null) {
             AliGramFileCopy.deleteQuietly(result.finalFile);
-            blobDao.incrementRefCount(existing.blobId);
             bindCopied(job, existing.blobId, dao, blobDao, previousBlobId);
             return;
         }
         PreservedBlob blob = new PreservedBlob();
         blob.blobId = blobId;
+        blob.accountId = job.accountId;
         blob.documentId = job.documentId;
         blob.photoId = job.photoId;
         blob.dcId = job.dcId;
@@ -1204,7 +1332,6 @@ public final class AliGramPreservation {
                 return;
             }
             AliGramFileCopy.deleteQuietly(result.finalFile);
-            blobDao.incrementRefCount(raced.blobId);
             bindCopied(job, raced.blobId, dao, blobDao, previousBlobId);
             return;
         }
@@ -1223,18 +1350,67 @@ public final class AliGramPreservation {
         if (!published) {
             AliGramFileCopy.deleteQuietly(result.finalFile);
         }
-        blobDao.incrementRefCount(blobId);
-        bindCopied(job, blobId, dao, blobDao, previousBlobId);
+        if (!bindCopied(job, blobId, dao, blobDao, previousBlobId)) {
+            // Ref re-pointed or terminated mid-copy (D-10): the published
+            // blob is orphaned (refCount 0, no ref points at it) — sweep
+            // it promptly instead of leaving it for a later sweep.
+            sweepRefcountZeroBlobs(job.accountId);
+        }
     }
 
-    /** Commit point: bind blobId, mark COPIED, release the delete gate. */
-    private static void bindCopied(PreservedRef job, String blobId, PreservedRefDao dao,
-                                   PreservedBlobDao blobDao, String previousBlobId) {
+    /**
+     * Commit point: bind blobId, mark COPIED, release the delete gate.
+     *
+     * <p>Phase 3.1 (D-10 + D-09 fix (2)): the single-writer rule for the
+     * state column is enforced here by re-reading the ref immediately
+     * before the bind. {@code liveSyncEdit} (storage queue) and
+     * {@code bindEditRevision} (globalQueue) mutate a live ref's
+     * identity/state off {@code copyQueue} while a {@code copyForRef}
+     * for the same ref may be mid-copy holding a stale snapshot — and a
+     * plain {@code dao.updateRef(job)} writes the whole entity, so the
+     * last writer wins: a copy of the OLD media could land as COPIED on
+     * a ref that was already re-pointed at the NEW media. When the
+     * fresh row is gone or its identity/state differ from the snapshot,
+     * the bind is ABORTED (false, without touching the ref or the blob
+     * refcount); callers drop their temp output, and the publish path
+     * sweeps the orphaned blob. The refcount increment lives here, after
+     * the check, so an aborted bind never leaks a count. A same-media
+     * role change (LIVE→EDIT by bindEditRevision, same identity) is
+     * NOT an abort: the copy is of that same media, so binding it to
+     * the (now EDIT) ref is correct.
+     *
+     * <p>Residual micro-race (by design, not closed here): the re-read
+     * and the update are not one transaction, so a re-point landing
+     * between them could still win the last-writer race. Closing it
+     * needs a transactional bind (state/identity checked in SQL). The
+     * window is a few DAO calls wide, and the re-point would have to
+     * land exactly there; the audit's prescribed fix is this re-read.
+     */
+    private static boolean bindCopied(PreservedRef job, String blobId, PreservedRefDao dao,
+                                      PreservedBlobDao blobDao, String previousBlobId) {
+        PreservedRef fresh = null;
+        try {
+            fresh = dao.getRefById(job.refId);
+        } catch (Throwable ignored) {
+        }
+        if (fresh == null
+                || fresh.documentId != job.documentId || fresh.photoId != job.photoId
+                || fresh.dcId != job.dcId || fresh.expectedSize != job.expectedSize
+                || (fresh.expectedFileName == null ? job.expectedFileName != null
+                        : !fresh.expectedFileName.equals(job.expectedFileName))
+                || fresh.state == null || !fresh.state.equals(job.state)) {
+            FileLog.d(TAG + ": bind aborted for ref " + job.refId + " — ref re-pointed or terminated mid-copy");
+            return false;
+        }
         if (previousBlobId != null && !previousBlobId.equals(blobId)) {
             try {
                 blobDao.decrementRefCount(previousBlobId);
             } catch (Throwable ignored) {
             }
+        }
+        try {
+            blobDao.incrementRefCount(blobId);
+        } catch (Throwable ignored) {
         }
         job.blobId = blobId;
         job.state = AliGramEligibility.STATE_COPIED;
@@ -1251,6 +1427,7 @@ public final class AliGramPreservation {
         }
         releaseDeferredDeletesForRef(job.accountId, job.refId);
         sweepRefcountZeroBlobs(job.accountId);
+        return true;
     }
 
     /** Terminal transition + both-halves cancellation helper. */
@@ -1371,6 +1548,27 @@ public final class AliGramPreservation {
                     refId = 0;
                 }
             }
+            // Phase 3.1 (D-04): a row recorded with sizeAtPin/mtimeAtPin
+            // == 0,0 can NEVER pass decideRelease (any existing file
+            // mismatches 0,0), so Layer-2 rows and pins made before the
+            // download finished were marked DONE without deleting the
+            // file. Stat the file here when the caller passed 0,0: the
+            // Layer-2 guard only knows the path, and a pin's
+            // sourceSize/sourceMtime are 0 while its source is still
+            // downloading. When the file does not exist (yet), keep 0,0 —
+            // the release then sees ALREADY_GONE, and the
+            // materialisation refresh (refreshDeferredForPath) fills in
+            // the real values once the file lands.
+            if (sizeAtPin == 0 && mtimeAtPin == 0) {
+                try {
+                    File f = new File(absolutePath);
+                    if (f.isFile()) {
+                        sizeAtPin = f.length();
+                        mtimeAtPin = f.lastModified();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
             DeferredDelete row = new DeferredDelete();
             row.accountId = account;
             row.refId = refId;
@@ -1445,6 +1643,23 @@ public final class AliGramPreservation {
     }
 
     /**
+     * Phase 3.1 (D-04): refresh PENDING deferred rows for a path whose
+     * file has just materialised with its final size/mtime (completion
+     * or watchdog reconcile or successful copy). Rows recorded while the
+     * source was still downloading carry 0,0; without this refresh the
+     * release decision could never pass and the file would leak.
+     */
+    private static void refreshDeferredForPath(String absolutePath, long size, long mtime) {
+        try {
+            DeferredDeleteDao dao = AliGramData.deferredDao();
+            if (dao != null && absolutePath != null && !absolutePath.isEmpty()) {
+                dao.refreshSizeMtimeForPath(absolutePath, size, mtime);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
      * Release deferred deletes for one ref. Only the copy-queue worker (and
      * the startup sweep, on the same queue) executes this, and only after
      * the ref's terminal transition has committed. Re-checks that no other
@@ -1498,10 +1713,25 @@ public final class AliGramPreservation {
                 return; // another active pin covers the path; released when it terminates
             }
             File file = new File(row.absolutePath);
-            AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
-                    file.exists(), file.exists() ? file.length() : 0,
-                    file.exists() ? file.lastModified() : 0,
-                    row.sizeAtPin, row.mtimeAtPin);
+            AliGramEligibility.ReleaseDecision decision;
+            if (row.sizeAtPin == 0 && row.mtimeAtPin == 0 && file.exists()) {
+                // Phase 3.1 (D-04): a row recorded with 0,0 was never
+                // verified against any file — there is nothing to
+                // mismatch against, so decideRelease would answer
+                // KEEP_MISMATCH forever. No active pin covers the path
+                // (checked above), and Telegram asked for this path to
+                // be deleted: delete it. Pre-existing 0,0 rows (written
+                // before the record-time stat + materialisation refresh)
+                // are covered by this; new rows get real values instead.
+                // decideRelease itself is unchanged for verified pins.
+                decision = AliGramEligibility.ReleaseDecision.DELETE;
+                FileLog.d(TAG + ": releasing unverified (0,0) deferred delete for " + row.absolutePath);
+            } else {
+                decision = AliGramEligibility.decideRelease(
+                        file.exists(), file.exists() ? file.length() : 0,
+                        file.exists() ? file.lastModified() : 0,
+                        row.sizeAtPin, row.mtimeAtPin);
+            }
             if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
                 if (row.cancelDeferred) {
                     cancelLoadFileByName(account, file.getName());
@@ -1537,16 +1767,48 @@ public final class AliGramPreservation {
             if (blobDao == null || refDao == null) {
                 return;
             }
+            HashSet<String> swept = new HashSet<>();
             for (PreservedBlob blob : blobDao.getOrphanBlobs()) {
                 if (refDao.countRefsForBlob(blob.blobId) > 0) {
                     continue;
                 }
-                File file = AliGramFileCopy.blobFileFor(account, blob.blobId, blob.ext);
-                AliGramFileCopy.deleteQuietly(file);
-                blobDao.deleteById(blob.blobId);
+                deleteBlobRowAndFiles(blob, blobDao);
+                swept.add(blob.blobId);
+            }
+            // Phase 3.1 (D-09): a crash between incrementRefCount and
+            // bindCopied leaves a blob with refCount > 0 and NO ref
+            // pointing at it, and getOrphanBlobs (refCount <= 0) never
+            // sees it — it leaked forever. Sweep the recomputed
+            // unreferenced set too (ignores the stored refCount, like
+            // sweepUnreferencedBlobs does after purge/clear).
+            for (PreservedBlob blob : blobDao.getUnreferencedBlobs()) {
+                if (!swept.add(blob.blobId)) {
+                    continue;
+                }
+                deleteBlobRowAndFiles(blob, blobDao);
             }
         } catch (Throwable e) {
             FileLog.e(TAG + ": sweepRefcountZeroBlobs failed", e);
+        }
+    }
+
+    /**
+     * Delete one orphaned blob row and its file. Phase 3.1 (D-05): the
+     * file is deleted from EVERY account directory, not just the
+     * caller's — a pre-D-05 or migrated row may carry a stale
+     * {@code accountId} while its file actually lives in another
+     * account's dir, and deleting only the caller's dir would leak the
+     * file. The name is the content-addressed blob id, so deleting it
+     * from a directory that does not contain it is a no-op.
+     */
+    private static void deleteBlobRowAndFiles(PreservedBlob blob, PreservedBlobDao blobDao) {
+        try {
+            for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                AliGramFileCopy.deleteQuietly(AliGramFileCopy.blobFileFor(a, blob.blobId, blob.ext));
+            }
+            blobDao.deleteById(blob.blobId);
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": deleteBlobRowAndFiles failed", e);
         }
     }
 
@@ -1592,7 +1854,7 @@ public final class AliGramPreservation {
             }
             long userId = ownUserId(account);
             boolean eligible = dao.getLiveRef(userId, dialogId, oldMessage.id) != null
-                    || findBlobForIdentity(blobDao, oldIdent) != null;
+                    || findBlobForIdentity(account, blobDao, oldIdent) != null;
             if (!eligible) {
                 return -1;
             }
@@ -1700,14 +1962,17 @@ public final class AliGramPreservation {
         }
     }
 
-    /** Policy (ii) test: does the exact media identity already exist as a blob? */
-    private static PreservedBlob findBlobForIdentity(PreservedBlobDao blobDao, MediaIdentity ident) {
+    /** Policy (ii) test: does the exact media identity already exist as a blob in THIS account?
+     *  Phase 3.1 (D-05): the lookup is account-scoped — another account's
+     *  blob proves nothing here, because its file lives in that
+     *  account's directory, not this one. */
+    private static PreservedBlob findBlobForIdentity(int account, PreservedBlobDao blobDao, MediaIdentity ident) {
         try {
             List<PreservedBlob> candidates;
             if (ident.documentId != 0) {
-                candidates = blobDao.getBlobsByDocument(ident.documentId, ident.dcId, ident.expectedSize);
+                candidates = blobDao.getBlobsByDocument(account, ident.documentId, ident.dcId, ident.expectedSize);
             } else if (ident.photoId != 0) {
-                candidates = blobDao.getBlobsByPhoto(ident.photoId, ident.dcId, ident.expectedSize);
+                candidates = blobDao.getBlobsByPhoto(account, ident.photoId, ident.dcId, ident.expectedSize);
             } else {
                 return null;
             }
@@ -1962,7 +2227,7 @@ public final class AliGramPreservation {
                 // No LIVE ref (message never enrolled): policy (i)+(ii).
                 MediaIdentity oldIdent = identifyMedia(account, oldMessage);
                 if (AliGramEligibility.isPreservableClass(oldIdent.mediaClass)) {
-                    PreservedBlob existingBlob = findBlobForIdentity(blobDao, oldIdent);
+                    PreservedBlob existingBlob = findBlobForIdentity(account, blobDao, oldIdent);
                     PreservedRef editRef = newPreservedRef(account, userId, dialogId, messageId,
                             "EDIT", seq, oldIdent, AliGramEligibility.STATE_UNAVAILABLE, "EDIT_FREEZE");
                     editRef.ayuFakeId = fakeId;
@@ -2085,6 +2350,14 @@ public final class AliGramPreservation {
             dao.deleteRefById(live.refId);
             mirrorRemoveForRef(live);
             forgetResolvedFilesForRef(live);
+            // Phase 3.1 (D-07): this path inlines its own delete instead
+            // of going through dropRefAndDecrement, so it needs the
+            // release explicitly — otherwise a LIVE job dropped
+            // ANCHOR_LOST (delete-event with the delete axis off, or the
+            // mark-path sweep) leaves its deferred deletes for the
+            // startup sweep only. Same idempotency as the funnel: only
+            // PENDING rows for this ref, active pins re-checked.
+            releaseDeferredDeletesForRef(account, live.refId);
             FileLog.d(TAG + ": LIVE ref dropped ANCHOR_LOST for message " + messageId + " in " + dialogId);
             sweepRefcountZeroBlobs(account);
         } catch (Throwable e) {
@@ -2153,6 +2426,19 @@ public final class AliGramPreservation {
             dao.deleteRefById(ref.refId);
             mirrorRemoveForRef(ref);
             forgetResolvedFilesForRef(ref);
+            // Phase 3.1 (D-07): the single funnel for all anchor-loss
+            // drops — ending the pin releases this ref's deferred
+            // deletes now instead of leaving them for the startup sweep.
+            // Idempotent with the per-ref releases the four dialog flows
+            // (onDialogDeleted / onDialogClearedExcept /
+            // onChannelHistoryCleared / clearPreservedForDialog) already
+            // do after calling here: those find the rows DONE and no-op
+            // (release only touches PENDING rows, and the release
+            // re-checks active pins per path, so a file another ref
+            // still pins survives). Verified: the sibling D-06 fix added
+            // those per-ref releases; this funnel call makes the release
+            // happen for every drop path, including future callers.
+            releaseDeferredDeletesForRef(ref.accountId, ref.refId);
         } catch (Throwable e) {
             FileLog.e(TAG + ": dropRefAndDecrement failed", e);
         }
@@ -2297,6 +2583,33 @@ public final class AliGramPreservation {
                             AliGramFileCopy.deleteQuietly(f);
                         }
                     }
+                    // Phase 3.1 (D-09): also sweep orphan pending-*.blob
+                    // files — a crash between the two renames in
+                    // copyForRef leaves one behind, and the old sweep
+                    // only matched ".tmp-". A pending file is owned by
+                    // a live non-terminal ref of the same id; anything
+                    // else (no ref, terminal ref, unparseable name) is
+                    // orphaned. A live job's stale pending file is
+                    // KEPT here — copyVerified deletes + retries it when
+                    // the copy is re-driven (D-09 fix (1)).
+                    for (File f : files) {
+                        String name = f.getName();
+                        if (!name.startsWith("pending-") || !name.endsWith(".blob")) {
+                            continue;
+                        }
+                        boolean owned = false;
+                        try {
+                            long ownerId = Long.parseLong(name.substring("pending-".length(), name.length() - ".blob".length()));
+                            PreservedRef owner = dao.getRefById(ownerId);
+                            owned = owner != null && owner.accountId == account
+                                    && !AliGramEligibility.isTerminalState(owner.state);
+                        } catch (Throwable ignored) {
+                            owned = false;
+                        }
+                        if (!owned) {
+                            AliGramFileCopy.deleteQuietly(f);
+                        }
+                    }
                 }
             }
         } catch (Throwable e) {
@@ -2334,8 +2647,49 @@ public final class AliGramPreservation {
         } catch (Throwable e) {
             FileLog.e(TAG + ": fakeId verification failed", e);
         }
+        // D-12 synthesis (BEFORE step 4, deliberately — not in step 5 as
+        // the audit suggests its placement): pendingDeletePaths is the
+        // crash-recovery seed, written at pin time but never read — if
+        // the process died between the pin insert and the Layer-1 record
+        // in the same storage pass, no DeferredDelete row exists for the
+        // file. Synthesise one per recorded path (INSERT OR IGNORE: a
+        // row Layer-1 already recorded is not duplicated; the size/mtime
+        // come from the ref, or are statted at record time when 0,0).
+        // It runs before step 4 so that step 4's terminal transitions
+        // (GATE_OFF / UNAVAILABLE / FAILED) release the synthesised rows
+        // through their normal release calls; rows for pins that stay
+        // active are skipped by the release's active-pin re-check and
+        // release when the pin terminates. Cancel intent comes from the
+        // pin (cancelDeferred) for the same reason.
+        try {
+            for (PreservedRef ref : dao.getNonTerminalRefs()) {
+                if (ref.accountId != account) {
+                    continue;
+                }
+                if (!AliGramEligibility.STATE_PINNED.equals(ref.state)
+                        && !AliGramEligibility.STATE_COPYING.equals(ref.state)) {
+                    continue;
+                }
+                if (ref.pendingDeletePaths == null || ref.pendingDeletePaths.isEmpty()) {
+                    continue;
+                }
+                for (String rawPath : ref.pendingDeletePaths.split(",")) {
+                    String path = rawPath == null ? "" : rawPath.trim();
+                    if (path.isEmpty()) {
+                        continue;
+                    }
+                    recordDeferredDelete(account, ref.refId, path, ref.sourceSize, ref.sourceMtime,
+                            "EDIT_TAIL", ref.cancelDeferred);
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": deferred-delete synthesis failed", e);
+        }
         // 4. Reset DOWNLOADING/COPYING → ENQUEUED after gate re-check;
-        //    re-drive PINNED rows; attempts budget bounds stuck pins.
+        //    re-drive PINNED rows whose source is on disk; PINNED rows
+        //    with no source go straight to UNAVAILABLE (D-11 — they can
+        //    never be re-downloaded after a restart, so the attempts
+        //    budget is not burned on them).
         try {
             long userId = ownUserId(account);
             for (PreservedRef ref : dao.getNonTerminalRefs()) {
@@ -2371,16 +2725,23 @@ public final class AliGramPreservation {
                             }
                         });
                     } else {
-                        ref.attempts++;
-                        if (AliGramEligibility.attemptsExhausted(ref.attempts)) {
-                            ref.state = AliGramEligibility.STATE_FAILED;
-                            ref.lastError = AliGramEligibility.REASON_SOURCE_GONE;
-                            dao.updateRef(ref);
-                            mirrorRemoveForRef(ref);
-                            releaseDeferredDeletesForRef(account, ref.refId);
-                        } else {
-                            dao.updateRef(ref);
-                        }
+                        // Phase 3.1 (D-11): a PINNED row whose source
+                        // never materialised cannot be re-downloaded
+                        // after a restart — the old TL object and the
+                        // PendingLoad are gone with the process, and
+                        // redriveEnqueuedJob rebuilds the NEW message,
+                        // not the old media (R-08: old-media re-download
+                        // after restart is out of v1 scope). Do NOT burn
+                        // the attempts budget over three restarts: go
+                        // straight to UNAVAILABLE (not FAILED) with the
+                        // distinct NO_PIN_SOURCE reason, and release its
+                        // deferred deletes now.
+                        ref.state = AliGramEligibility.STATE_UNAVAILABLE;
+                        ref.lastError = AliGramEligibility.REASON_NO_PIN_SOURCE;
+                        ref.updatedAt = System.currentTimeMillis() / 1000;
+                        dao.updateRef(ref);
+                        mirrorRemoveForRef(ref);
+                        releaseDeferredDeletesForRef(account, ref.refId);
                     }
                 } else if (AliGramEligibility.STATE_ENQUEUED.equals(ref.state)) {
                     redriveEnqueuedJob(account, ref);
@@ -2577,20 +2938,34 @@ public final class AliGramPreservation {
      * (unlike purgeAccount) so enabled chats keep preserving new media. */
     public static void clearPreservedStorage(int account) {
         try {
-            long userId = ownUserId(account);
             if (ensureInitialized(account)) {
                 copyQueue.postRunnable(() -> {
                     try {
                         PreservedRefDao dao = AliGramData.refDao();
                         DeferredDeleteDao deferredDao = AliGramData.deferredDao();
                         if (dao != null) {
+                            // Phase 3.1 (D-02): collect the rows first,
+                            // delete them, and only THEN clean the
+                            // mirrors — mirrorRemoveForRef re-checks the
+                            // DAO for other active refs, so cleaning
+                            // before the delete would see the doomed rows
+                            // as still active and leave stale-pinned
+                            // entries behind.
+                            ArrayList<PreservedRef> accountRefs = new ArrayList<>();
                             for (PreservedRef ref : dao.getAllRefs()) {
                                 if (ref.accountId == account) {
-                                    forgetResolvedFilesForRef(ref);
-                                    mirrorRemoveForRef(ref);
+                                    accountRefs.add(ref);
                                 }
                             }
-                            dao.deleteRefsForAccount(userId);
+                            // Phase 3.1 (D-03): key the delete on the
+                            // account id, not the user id (same trap as
+                            // purgeAccount — the user id is not stable
+                            // across account lifecycle events).
+                            dao.deleteRefsForAccountId(account);
+                            for (PreservedRef ref : accountRefs) {
+                                forgetResolvedFilesForRef(ref);
+                                mirrorRemoveForRef(ref);
+                            }
                         }
                         if (deferredDao != null) {
                             // Account-wide ON PURPOSE here (settings clear-all):
@@ -2739,20 +3114,46 @@ public final class AliGramPreservation {
     /** Account removal (P-8): purge that account's refs and blob subtree. */
     public static void purgeAccount(int account) {
         try {
-            long userId = ownUserId(account);
             if (ensureInitialized(account)) {
                 copyQueue.postRunnable(() -> {
                     try {
                         PreservedRefDao dao = AliGramData.refDao();
                         DeferredDeleteDao deferredDao = AliGramData.deferredDao();
                         if (dao != null) {
+                            // Phase 3.1 (D-02): collect the rows first,
+                            // delete them, and only THEN clean the
+                            // mirrors — mirrorRemoveForRef re-checks the
+                            // DAO for other active refs, so cleaning
+                            // before the delete would see the doomed rows
+                            // as still active and leave stale-pinned
+                            // entries behind.
+                            ArrayList<PreservedRef> accountRefs = new ArrayList<>();
                             for (PreservedRef ref : dao.getAllRefs()) {
                                 if (ref.accountId == account) {
-                                    forgetResolvedFilesForRef(ref);
-                                    mirrorRemoveForRef(ref);
+                                    accountRefs.add(ref);
                                 }
                             }
-                            dao.deleteRefsForAccount(userId);
+                            // Phase 3.1 (D-03, RELEASE-BLOCKING): delete
+                            // by accountId, NOT by userId. performLogout
+                            // calls UserConfig.clearConfig() (clientUserId
+                            // = 0) BEFORE this hook, so the old
+                            // deleteRefsForAccount(ownUserId(account))
+                            // deleted zero rows and every PreservedRef /
+                            // PreservedBlob row survived logout.
+                            // Residual note (audit §1.2 D-03): the purge
+                            // still runs as a copyQueue runnable — if the
+                            // process dies between logout and the runnable,
+                            // the purge never runs. It cannot be made
+                            // synchronous here: performLogout runs on the
+                            // UI thread and Room forbids main-thread
+                            // queries. The rows are inert without the blob
+                            // subtree/prefs, and the next startup's
+                            // split-brain check marks them UNAVAILABLE.
+                            dao.deleteRefsForAccountId(account);
+                            for (PreservedRef ref : accountRefs) {
+                                forgetResolvedFilesForRef(ref);
+                                mirrorRemoveForRef(ref);
+                            }
                         }
                         if (deferredDao != null) {
                             // Account-wide ON PURPOSE here (account removal):

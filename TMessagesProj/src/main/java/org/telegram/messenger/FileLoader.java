@@ -1464,6 +1464,50 @@ public class FileLoader extends BaseController {
         return new File(dir, getAttachFileName(attach, ext));
     }
 
+    /**
+     * AliGram (Phase 3.1, D-14): the in-progress temp file for an attach,
+     * mirroring {@link #getPathToAttach(TLObject)}. The completed-preload
+     * swallow removes the operation from {@code loadOperationPaths} (via
+     * {@code checkDownloadQueue}), so a live-operation lookup alone would
+     * miss exactly the case the watchdog must rescue: when no operation
+     * exists, the temp name is derived the way
+     * {@code FileLoadOperation.setPaths} builds it — {@code <stem>.temp}
+     * in {@code MEDIA_DIR_CACHE} (tempDir is always that directory,
+     * {@code FileLoader:889}), where {@code <stem>} is the attach file
+     * name without its extension (document {@code <dc>_<id>.mp4} →
+     * {@code <dc>_<id>.temp}; photo {@code <vol>_<local>.jpg} →
+     * {@code <vol>_<local>.temp}; web {@code <md5>.ext} →
+     * {@code <md5>.temp}). Encrypted downloads ({@code .temp.enc}) are
+     * NOT returned here — callers must never copy ciphertext as a blob.
+     * The returned file may not exist; callers check that, and the
+     * length-equals-expected-size check decides completeness.
+     */
+    public File getTempPathToAttach(TLObject attach) {
+        if (attach == null) {
+            return null;
+        }
+        String fileName = getAttachFileName(attach);
+        if (fileName == null || fileName.isEmpty()) {
+            return null;
+        }
+        FileLoadOperation operation = loadOperationPaths.get(fileName);
+        if (operation != null) {
+            try {
+                File current = operation.getCurrentFileFast();
+                if (current != null && current.getName().endsWith(".temp")) {
+                    return current;
+                }
+                // Finished with the final file ready: the normal
+                // final-path reconcile handles it; there is no temp.
+                return null;
+            } catch (Throwable ignored) {
+            }
+        }
+        int dot = fileName.lastIndexOf('.');
+        String stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+        return new File(getDirectory(MEDIA_DIR_CACHE), stem + ".temp");
+    }
+
     public FilePathDatabase getFileDatabase() {
         return filePathDatabase;
     }

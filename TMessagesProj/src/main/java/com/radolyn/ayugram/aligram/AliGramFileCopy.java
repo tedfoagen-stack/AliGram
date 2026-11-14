@@ -156,10 +156,16 @@ public final class AliGramFileCopy {
         boolean renamed = false;
         for (int attempt = 0; attempt < 3 && !renamed; attempt++) {
             if (finalFile.exists()) {
-                // Another job already published the same deterministic name.
-                renamed = true;
-                deleteQuietly(tempFile);
-                break;
+                // Phase 3.1 (D-09): a stale pending-<refId>.blob from a
+                // previous crashed/interrupted copy for the same ref must
+                // NEVER be accepted unverified — it may hold different
+                // source bytes than the stream just copied, and the
+                // caller would publish it under a blobId computed from
+                // the CURRENT stream's SHA (blob content != stored SHA).
+                // The pending name is unique per refId and copyQueue is
+                // single-threaded, so an existing file here is always
+                // stale: delete it and retry the rename.
+                deleteQuietly(finalFile);
             }
             renamed = tempFile.renameTo(finalFile);
         }

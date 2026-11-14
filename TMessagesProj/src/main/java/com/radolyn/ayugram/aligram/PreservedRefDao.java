@@ -49,6 +49,18 @@ public interface PreservedRefDao {
     @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId AND expectedFileName = :expectedFileName AND state IN ('ENQUEUED', 'DOWNLOADING', 'PINNED')")
     List<PreservedRef> getWaitingJobsForFile(int accountId, String expectedFileName);
 
+    /**
+     * Phase 3.1 (D-02): active refs (any pin state, incl. COPYING) for
+     * one attach file name. The name mirror
+     * ({@code AliGramPreservation.pinnedNameMirror}) is keyed by file
+     * name and shared by the fan-out refs for one file, so it must only
+     * be cleared when NO active ref still names the file — otherwise
+     * the {@code cancelDownloading} pin guard would miss a still-pinned
+     * freeze copy.
+     */
+    @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId AND expectedFileName = :expectedFileName AND state IN ('ENQUEUED', 'DOWNLOADING', 'PINNED', 'COPYING')")
+    List<PreservedRef> getActiveRefsForFileName(int accountId, String expectedFileName);
+
     /** Active pins covering one source path (Layer-1/Layer-2 guard + release check). */
     @Query("SELECT * FROM PreservedRef WHERE sourcePath = :sourcePath AND state IN ('PINNED', 'COPYING', 'DOWNLOADING', 'ENQUEUED')")
     List<PreservedRef> getActivePinsForPath(String sourcePath);
@@ -85,6 +97,21 @@ public interface PreservedRefDao {
 
     @Query("DELETE FROM PreservedRef WHERE userId = :userId")
     void deleteRefsForAccount(long userId);
+
+    /**
+     * Phase 3.1 (D-03): delete by the STABLE account id, never by
+     * {@code userId}. {@code MessagesController.performLogout} calls
+     * {@code UserConfig.clearConfig()} (which zeroes
+     * {@code clientUserId}) BEFORE the AliGram purge hook, so a purge
+     * keyed on {@code ownUserId(account)} deleted nothing — every
+     * {@code PreservedRef} row survived logout. The account id cannot
+     * be cleared out from under the purge, so this is robust to
+     * call-site ordering. Use this for account removal; keep
+     * {@link #deleteRefsForAccount(long)} only for callers that still
+     * hold a valid user id.
+     */
+    @Query("DELETE FROM PreservedRef WHERE accountId = :accountId")
+    void deleteRefsForAccountId(int accountId);
 
     @Query("DELETE FROM PreservedRef WHERE userId = :userId AND dialogId = :dialogId")
     void deleteRefsForDialog(long userId, long dialogId);

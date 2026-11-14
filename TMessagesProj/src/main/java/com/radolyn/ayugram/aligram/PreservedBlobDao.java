@@ -8,28 +8,31 @@ import androidx.room.Query;
 import java.util.List;
 
 /** DAO for {@link PreservedBlob}. Dedupe happens at copy time: if a blob
- *  with the same (documentId|photoId, dcId, size, sha256) already exists,
- *  the temp copy is discarded and the existing blob is reused (refcount+1). */
+ *  with the same (accountId, documentId|photoId, dcId, size, sha256)
+ *  already exists, the temp copy is discarded and the existing blob is
+ *  reused (refcount+1). Phase 3.1 (D-05): every identity lookup is
+ *  account-scoped — blob files live in per-account directories, so a
+ *  global lookup could bind a ref to a file in another account's dir. */
 @Dao
 public interface PreservedBlobDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     long insertBlob(PreservedBlob blob);
 
-    @Query("SELECT * FROM PreservedBlob WHERE documentId = :documentId AND dcId = :dcId AND size = :size")
-    List<PreservedBlob> getBlobsByDocument(long documentId, int dcId, long size);
+    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND documentId = :documentId AND dcId = :dcId AND size = :size")
+    List<PreservedBlob> getBlobsByDocument(int accountId, long documentId, int dcId, long size);
 
-    @Query("SELECT * FROM PreservedBlob WHERE photoId = :photoId AND dcId = :dcId AND size = :size")
-    List<PreservedBlob> getBlobsByPhoto(long photoId, int dcId, long size);
+    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND photoId = :photoId AND dcId = :dcId AND size = :size")
+    List<PreservedBlob> getBlobsByPhoto(int accountId, long photoId, int dcId, long size);
 
     @Query("SELECT * FROM PreservedBlob WHERE blobId = :blobId LIMIT 1")
     PreservedBlob getById(String blobId);
 
-    @Query("SELECT * FROM PreservedBlob WHERE documentId = :documentId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
-    PreservedBlob getByDocumentKey(long documentId, int dcId, long size, String sha256);
+    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND documentId = :documentId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
+    PreservedBlob getByDocumentKey(int accountId, long documentId, int dcId, long size, String sha256);
 
-    @Query("SELECT * FROM PreservedBlob WHERE photoId = :photoId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
-    PreservedBlob getByPhotoKey(long photoId, int dcId, long size, String sha256);
+    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND photoId = :photoId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
+    PreservedBlob getByPhotoKey(int accountId, long photoId, int dcId, long size, String sha256);
 
     @Query("UPDATE PreservedBlob SET refCount = refCount + 1 WHERE blobId = :blobId")
     void incrementRefCount(String blobId);

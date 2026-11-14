@@ -80,6 +80,18 @@ public interface DeferredDeleteDao {
     @Query("UPDATE DeferredDelete SET state = :state WHERE id = :id")
     void setState(long id, String state);
 
+    /**
+     * Phase 3.1 (D-04): refresh a PENDING row's recorded size/mtime when
+     * the pinned file materialises. Rows recorded while the source was
+     * still downloading carry {@code sizeAtPin == 0 && mtimeAtPin == 0}
+     * (nothing on disk to stat at record time); without this refresh the
+     * release decision could never pass {@code decideRelease} and the
+     * file would leak. Only PENDING rows are touched — a row already
+     * DONE was settled and must never be rewritten.
+     */
+    @Query("UPDATE DeferredDelete SET sizeAtPin = :sizeAtPin, mtimeAtPin = :mtimeAtPin WHERE absolutePath = :absolutePath AND state = 'PENDING'")
+    void refreshSizeMtimeForPath(String absolutePath, long sizeAtPin, long mtimeAtPin);
+
     /** Terminal rows only (a DONE row's file was already handled). */
     @Query("DELETE FROM DeferredDelete WHERE state = 'DONE'")
     void deleteDone();

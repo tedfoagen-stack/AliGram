@@ -31,6 +31,7 @@ public final class AliGramData {
         try {
             database = Room.databaseBuilder(ApplicationLoader.applicationContext, AliGramDatabase.class, DATABASE_NAME)
                     .fallbackToDestructiveMigrationOnDowngrade()
+                    .addMigrations(AliGramDatabase.MIGRATION_1_2)
                     .build();
             return true;
         } catch (Throwable e) {

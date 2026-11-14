@@ -338,6 +338,24 @@ public final class AliGramEligibility {
         return String.format(Locale.US, "s%d_%s", size, shaPart);
     }
 
+    /**
+     * Phase 3.1 (D-05): account-scoped blob id. Blob files live in
+     * per-account directories, but the blob id is the primary key — so a
+     * global id let two accounts share one row pointing at a file that
+     * exists in only one account's directory (the second account's ref
+     * then rendered nothing and degraded to UNAVAILABLE at startup, and
+     * a purge of the first account deleted the file under the second
+     * account's ref). Account 0 keeps the legacy id (existing installs'
+     * rows stay valid); other accounts get an {@code a<N>_} prefix, so
+     * the same media in two accounts is two rows in two directories.
+     * The 5-arg form above is unchanged (its format is pinned by tests).
+     */
+    public static String blobIdFor(int accountId, long documentId, long photoId, int dcId,
+                                   long size, String sha256Hex) {
+        String base = blobIdFor(documentId, photoId, dcId, size, sha256Hex);
+        return accountId == 0 ? base : "a" + accountId + "_" + base;
+    }
+
     /** SHA-256 hex of bytes (single-pass helper used by tests and the copy path). */
     public static String sha256Hex(byte[] data) {
         try {
@@ -390,6 +408,14 @@ public final class AliGramEligibility {
     public static final String REASON_ANCHOR_LOST = "ANCHOR_LOST";
     public static final String REASON_PRE_ACTIVATION_MEDIA = "PRE_ACTIVATION_MEDIA";
     public static final String REASON_NO_PIN_SITE = "NO_PIN_SITE";
+    /**
+     * Phase 3.1 (D-11): a PINNED freeze pin whose source never
+     * materialised and cannot be re-downloaded after a restart — the old
+     * TL object and the PendingLoad died with the process, and the
+     * re-drive rebuilds the NEW message, not the old media (R-08).
+     * Distinct from SOURCE_GONE (the source existed and vanished).
+     */
+    public static final String REASON_NO_PIN_SOURCE = "NO_PIN_SOURCE";
     public static final String REASON_EDIT_DATE_UNKNOWN = "EDIT_DATE_UNKNOWN";
 
     // ------------------------------------------------------------------

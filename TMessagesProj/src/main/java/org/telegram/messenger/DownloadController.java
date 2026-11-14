@@ -1140,11 +1140,27 @@ public class DownloadController extends BaseController implements NotificationCe
             }
             if (downloadObject.object instanceof TLRPC.Document) {
                 TLRPC.Document document = (TLRPC.Document) downloadObject.object;
+                // --- AliGram hook (Phase 3.1, D-02): the deferred-cancel
+                // rule — never cancel a pinned file's in-flight download.
+                // deleteFromDownloadQueue feeds this path after an edit,
+                // bypassing the isFileNamePinned guard that
+                // FileLoader.cancelLoadFiles has; the mirror lookup is
+                // UI-thread-safe (no DAO). The cancel intent is already
+                // recorded as a DeferredDelete row by Layer 1 and fires
+                // at release time instead.
+                if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(document))) {
+                    continue;
+                }
                 getFileLoader().cancelLoadFile(document, true);
             } else if (downloadObject.object instanceof TLRPC.Photo) {
                 TLRPC.Photo photo = (TLRPC.Photo) downloadObject.object;
                 TLRPC.PhotoSize photoSize = FileLoader.getClosestPhotoSizeWithSize(photo.sizes, AndroidUtilities.getPhotoSize());
                 if (photoSize != null) {
+                    // --- AliGram hook (Phase 3.1, D-02): same pin guard
+                    // as the Document branch above.
+                    if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(photoSize))) {
+                        continue;
+                    }
                     getFileLoader().cancelLoadFile(photoSize, true);
                 }
             }
