@@ -11,12 +11,14 @@ import androidx.recyclerview.widget.RecyclerView;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.browser.Browser;
+import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.Cells.TextSettingsCell;
 
 import tw.nekomimi.nekogram.DatacenterActivity;
 
 public class NekoAboutActivity extends BaseNekoSettingsActivity {
 
+    private int aligramAboutRow;
     private int xChannelRow;
     private int channelRow;
     private int channelTipsRow;
@@ -28,6 +30,7 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
     protected void updateRows() {
         super.updateRows();
 
+        aligramAboutRow = addRow();
         xChannelRow = addRow();
         channelRow = addRow();
         channelTipsRow = addRow();
@@ -43,7 +46,14 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
 
     @Override
     protected void onItemClick(View view, int position, float x, float y) {
-        if (position == xChannelRow) {
+        if (position == aligramAboutRow) {
+            // --- AliGram: app identity, based-on statement and GPL notice.
+            new AlertDialog.Builder(getParentActivity())
+                    .setTitle(getString(R.string.AliGramAboutTitle))
+                    .setMessage(getString(R.string.AliGramAboutText))
+                    .setPositiveButton(getString(R.string.OK), null)
+                    .show();
+        } else if (position == xChannelRow) {
             MessagesController.getInstance(currentAccount).openByUserName("NagramX", NekoAboutActivity.this, 1);
         } else if (position == channelRow) {
             MessagesController.getInstance(currentAccount).openByUserName("nagram_channel", NekoAboutActivity.this, 1);
@@ -73,7 +83,9 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
         public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position, boolean partial) {
             if (holder.getItemViewType() == TYPE_SETTINGS) {
                 TextSettingsCell textCell = (TextSettingsCell) holder.itemView;
-                if (position == xChannelRow) {
+                if (position == aligramAboutRow) {
+                    textCell.setTextAndValue(getString(R.string.AliGramAboutTitle), getString(R.string.AliGramPreservationTitle), true);
+                } else if (position == xChannelRow) {
                     textCell.setTextAndValue(getString(R.string.XChannel), "@NagramX", true);
                 } else if (position == channelRow) {
                     textCell.setTextAndValue(getString(R.string.OfficialChannel), "@nagram_channel", true);

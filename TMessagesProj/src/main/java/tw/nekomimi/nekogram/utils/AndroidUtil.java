@@ -352,8 +352,9 @@ public class AndroidUtil {
 
     @SuppressWarnings("ConstantValue")
     public static boolean shouldEnableCrashlytics() {
-        return !BuildConfig.DEBUG
-                && "nu.gpu.nagram".equals(BuildConfig.APPLICATION_ID)
-                && !NaConfig.INSTANCE.getDisableCrashlyticsCollection().Bool();
+        // AliGram: crash reporting stays disabled — the upstream Firebase
+        // project (google-services.json) belongs to Nagram, and AliGram
+        // ships under its own applicationId.
+        return false;
     }
 }

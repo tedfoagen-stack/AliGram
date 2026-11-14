@@ -138,6 +138,8 @@ import com.google.zxing.common.detector.MathUtils;
 
 import com.radolyn.ayugram.AyuConstants;
 import com.radolyn.ayugram.AyuUtils;
+import com.radolyn.ayugram.aligram.AliGramEligibility;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 import com.radolyn.ayugram.messages.AyuSavePreferences;
@@ -483,6 +485,7 @@ public class ChatActivity extends BaseFragment implements
     private final static int nkbtn_report = 2041;
     private final static int nkbtn_clearDeleted = 2100;
     private final static int nkbtn_viewDeleted = 2101;
+    private final static int nkbtn_aligram_preserve = 2102;
 
     public int shareAlertDebugMode = DEBUG_SHARE_ALERT_MODE_NORMAL;
     public boolean shareAlertDebugTopicsSlowMotion;
@@ -4918,6 +4921,8 @@ public class ChatActivity extends BaseFragment implements
             }
             hideTitleItem = NaConfig.INSTANCE.getChatMenuItemHideTitle().Bool() ? headerItem.lazilyAddSubItem(nkheaderbtn_hide_title, R.drawable.hide_title, getString(R.string.HideTitle)) : null;
             if (NaConfig.INSTANCE.getChatMenuItemViewDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_viewDeleted, R.drawable.msg_view_file, getString(R.string.ViewDeleted));
+            // --- AliGram: per-chat media preservation toggle (groups/channels only).
+            if (currentChat != null) headerItem.lazilyAddSubItem(nkbtn_aligram_preserve, R.drawable.msg_saved_solar, getString(R.string.AliGramPreserveMedia));
             if (NaConfig.INSTANCE.getChatMenuItemClearDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_clearDeleted, R.drawable.msg_clear, getString(R.string.ClearDeleted));
             if (!isTopic) {
                 if (NaConfig.INSTANCE.getChatMenuItemDeleteOwnMessages().Bool() && (ChatObject.isMegagroup(currentChat) || currentChat != null && !ChatObject.isChannel(currentChat))) {
@@ -46256,6 +46261,8 @@ public class ChatActivity extends BaseFragment implements
             }
         } else if (id == nkbtn_viewDeleted) {
             presentFragment(new AyuViewDeleted(dialog_id));
+        } else if (id == nkbtn_aligram_preserve) {
+            showAliGramPreservationDialog();
         } else if (id == nkbtn_bookmarks_manager) {
             presentFragment(new BookmarksActivity(dialog_id));
         } else if (id == nkheaderbtn_upgrade) {
@@ -46348,6 +46355,61 @@ public class ChatActivity extends BaseFragment implements
                 clearSelectionMode();
             });
         }
+    }
+
+    // --- AliGram: per-chat media preservation toggle dialog. Stats are
+    // loaded on a background thread (Room queries), then the dialog is
+    // shown on the UI thread.
+    private void showAliGramPreservationDialog() {
+        if (getParentActivity() == null) {
+            return;
+        }
+        final long did = dialog_id;
+        final int account = currentAccount;
+        Utilities.globalQueue.postRunnable(() -> {
+            final long[] stats = AliGramPreservation.getPreservedStatsForDialog(account, did);
+            AndroidUtilities.runOnUIThread(() -> showAliGramPreservationDialogInternal(did, stats));
+        });
+    }
+
+    private void showAliGramPreservationDialogInternal(long did, long[] stats) {
+        if (getParentActivity() == null) {
+            return;
+        }
+        final int account = currentAccount;
+        boolean enabled = AliGramPreservation.isOptedIn(account, did);
+        AliGramPreservation.Activation act = AliGramPreservation.getActivation(account, did);
+        StringBuilder message = new StringBuilder();
+        message.append(getString(enabled ? R.string.AliGramPreservationEnabled : R.string.AliGramPreservationDisabled));
+        if (enabled && act.state == AliGramEligibility.ActivationState.PENDING) {
+            message.append("\n\n").append(getString(R.string.AliGramPreservationPending));
+        }
+        if (stats != null && stats[0] > 0) {
+            message.append("\n\n").append(LocaleController.formatString(R.string.AliGramPreservationStats, stats[0], AndroidUtilities.formatFileSize(stats[2])));
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+        builder.setTitle(getString(R.string.AliGramPreservationTitle));
+        builder.setMessage(message.toString());
+        builder.setPositiveButton(getString(enabled ? R.string.AliGramPreservationDisable : R.string.AliGramPreservationEnable), (dialogInterface, i) -> {
+            boolean nowEnabled = AliGramPreservation.togglePreservation(account, did);
+            BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(nowEnabled ? R.string.AliGramPreservationEnabledToast : R.string.AliGramPreservationDisabledToast)).show();
+        });
+        builder.setNeutralButton(getString(R.string.AliGramPreservationClear), (dialogInterface, i) -> {
+            AlertDialog.Builder confirm = new AlertDialog.Builder(getParentActivity());
+            confirm.setTitle(getString(R.string.AliGramPreservationTitle));
+            confirm.setMessage(getString(R.string.AliGramPreservationClearConfirm));
+            confirm.setPositiveButton(getString(R.string.Clear), (d, which) -> {
+                Utilities.globalQueue.postRunnable(() -> {
+                    AliGramPreservation.clearPreservedForDialog(account, did);
+                    AndroidUtilities.runOnUIThread(() -> BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show());
+                });
+            });
+            confirm.setNegativeButton(getString(R.string.Cancel), null);
+            confirm.makeRed(AlertDialog.BUTTON_POSITIVE);
+            showDialog(confirm.create());
+        });
+        builder.setNegativeButton(getString(R.string.Cancel), null);
+        showDialog(builder.create());
     }
 
     private void nkbtn_onclick(int id) {

@@ -19,6 +19,7 @@ import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.radolyn.ayugram.AyuConstants;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 
@@ -167,6 +168,27 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
             .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
             .makeRed(AlertDialog.BUTTON_POSITIVE)
             .show()));
+    // --- AliGram: preserved-media storage (per-chat opt-ins stay enabled;
+    // only the stored copies are deleted).
+    private final AbstractConfigCell clearPreservedMediaRow = cellGroup.appendCell(new ConfigCellTextCheckIcon(null, "AliGramPreservedStorage", null, "...", R.drawable.msg_clear, false, () -> new AlertDialog.Builder(getContext(), getResourceProvider())
+            .setTitle(getString(R.string.AliGramPreservedStorage))
+            .setMessage(getString(R.string.AliGramPreservedStorageAbout) + "\n\n" + getString(R.string.AliGramClearPreservedConfirm))
+            .setPositiveButton(getString(R.string.Clear), (dialog, which) -> {
+                AlertDialog progressDialog = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
+                progressDialog.setCanCancel(false);
+                progressDialog.show();
+                Utilities.globalQueue.postRunnable(() -> {
+                    AliGramPreservation.clearPreservedStorage(currentAccount);
+                    AndroidUtilities.runOnUIThread(() -> {
+                        progressDialog.dismiss();
+                        BulletinFactory.of(this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show();
+                    });
+                    loadAliGramPreservedSize();
+                });
+            })
+            .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
+            .makeRed(AlertDialog.BUTTON_POSITIVE)
+            .show()));
     private final AbstractConfigCell dividerAyuMoments = cellGroup.appendCell(new ConfigCellDivider());
 
     // N-Config
@@ -216,6 +238,7 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
         AyuData.loadSizes(this);
+        loadAliGramPreservedSize();
         return true;
     }
 
@@ -564,6 +587,21 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
         if (listAdapter != null) {
             ((ConfigCellTextCheckIcon) clearMessageDatabaseRow).setValue(AyuData.totalSize > 0 ? AndroidUtilities.formatFileSize(AyuData.totalSize) : "...");
             listAdapter.notifyItemChanged(cellGroup.rows.indexOf(clearMessageDatabaseRow));
+        }
+    }
+
+    private void loadAliGramPreservedSize() {
+        Utilities.globalQueue.postRunnable(() -> {
+            long[] stats = AliGramPreservation.getPreservedStats(currentAccount);
+            AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(stats), 500);
+        });
+    }
+
+    public void refreshAliGramPreservedSize(long[] stats) {
+        if (listAdapter != null) {
+            String value = stats[0] + " · " + AndroidUtilities.formatFileSize(stats[2]);
+            ((ConfigCellTextCheckIcon) clearPreservedMediaRow).setValue(value);
+            listAdapter.notifyItemChanged(cellGroup.rows.indexOf(clearPreservedMediaRow));
         }
     }
 

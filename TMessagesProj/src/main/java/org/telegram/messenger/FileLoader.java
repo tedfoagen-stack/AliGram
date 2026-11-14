@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.utils.AyuFileLocation;
 
 public class FileLoader extends BaseController {
@@ -586,6 +587,12 @@ public class FileLoader extends BaseController {
 
     public void cancelLoadFiles(ArrayList<String> fileNames) {
         for (int a = 0, N = fileNames.size(); a < N; a++) {
+            // --- AliGram hook: never cancel an in-flight freeze copy
+            // (cancelDeferred — the deferred row recorded at Layer 1
+            // already carries the cancel intent for release time).
+            if (AliGramPreservation.isFileNamePinned(fileNames.get(a))) {
+                continue;
+            }
             cancelLoadFile(null, null, null, null, null, fileNames.get(a), true);
         }
     }
@@ -684,6 +691,11 @@ public class FileLoader extends BaseController {
 
     public void cancelLoadAllFiles() {
         for (String fileName : loadOperationPathsUI.keySet()) {
+            // --- AliGram hook: never cancel an in-flight preservation
+            // download (the freeze copy depends on its H-C wake-up).
+            if (AliGramPreservation.isFileNamePinned(fileName)) {
+                continue;
+            }
             LoadOperationUIObject uiObject = loadOperationPathsUI.get(fileName);
             Runnable runnable = uiObject != null ? uiObject.loadInternalRunnable : null;
             boolean removed = uiObject != null;
@@ -1747,6 +1759,20 @@ public class FileLoader extends BaseController {
         fileLoaderQueue.postRunnable(() -> {
             for (int a = 0; a < files.size(); a++) {
                 File file = files.get(a);
+                // --- AliGram hook (Layer-2 deferred-delete guard, Phase 2.3
+                // §2.2): a pinned file — and its .enc / .enc.key / q_ siblings
+                // — is never deleted here. A DeferredDelete row is recorded
+                // instead and released only after the copy reaches a
+                // terminal state. This is the funnel for all six
+                // .deleteFiles( sites in MessagesStorage.
+                if (AliGramPreservation.isPathPinned(file.getAbsolutePath())) {
+                    try {
+                        AliGramPreservation.recordDeferredDelete(currentAccount, file.getAbsolutePath(), 0, 0, "DELETE", false);
+                    } catch (Throwable e) {
+                        FileLog.e(e);
+                    }
+                    continue;
+                }
                 File encrypted = new File(file.getAbsolutePath() + ".enc");
                 if (encrypted.exists()) {
                     try {

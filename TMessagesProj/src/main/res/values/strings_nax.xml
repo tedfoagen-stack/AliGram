@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="NagramX" translatable="false">Nagram X</string>
+    <string name="NagramX" translatable="false">AliGram</string>
     <string name="XChannel">Nagram X Channel</string>
     <string name="EnableSaveDeletedMessages">Save Deleted Messages</string>
     <string name="DeletedMessage">deleted</string>
@@ -285,6 +285,24 @@
     <string name="FixLinkPreview">Fix Link Preview</string>
     <string name="NoQuoteForwardShort">NoQuote</string>
     <string name="ViewDeleted">View Deleted</string>
+    <string name="AliGramPreserveMedia">Preserve media</string>
+    <string name="AliGramPreservationTitle">AliGram media preservation</string>
+    <string name="AliGramPreservationEnabled">Preservation is ON for this chat. New media received from now on is downloaded and kept in private storage, so it survives deletion or edits.</string>
+    <string name="AliGramPreservationDisabled">Preservation is OFF for this chat. New media is not downloaded or kept.</string>
+    <string name="AliGramPreservationPending">Activation pending: will start when Telegram reconnects and completes a server sync.</string>
+    <string name="AliGramPreservationStats">%1$d preserved items, %2$s stored in this chat</string>
+    <string name="AliGramPreservationEnable">Enable preservation</string>
+    <string name="AliGramPreservationDisable">Disable preservation</string>
+    <string name="AliGramPreservationClear">Clear preserved media</string>
+    <string name="AliGramPreservationClearConfirm">Delete all media preserved by AliGram in this chat? Preservation stays enabled and will keep preserving new media.</string>
+    <string name="AliGramPreservedCleared">Preserved media cleared</string>
+    <string name="AliGramPreservationEnabledToast">Media preservation enabled for this chat</string>
+    <string name="AliGramPreservationDisabledToast">Media preservation disabled for this chat</string>
+    <string name="AliGramPreservedStorage">AliGram preserved media</string>
+    <string name="AliGramAboutTitle">AliGram</string>
+    <string name="AliGramAboutText">AliGram is a modified Telegram client based on NagramX.\n\nMedia preservation: in selected groups and channels, new media is downloaded when it arrives and kept in private storage, so it survives deletion or edits.\n\nAliGram is free software licensed under the GNU General Public License v3. Upstream source and attribution are preserved in the project repository.</string>
+    <string name="AliGramClearPreservedConfirm">Delete all media preserved by AliGram? Per-chat preservation stays enabled and will keep preserving new media.</string>
+    <string name="AliGramPreservedStorageAbout">Media from selected groups and channels is downloaded when received and kept in private storage, so it survives deletion or edits.</string>
     <string name="PasskeyLogin">Passkey Login</string>
     <string name="PasskeyInfo2">This feature only works with password managers that allow the user to manage trust settings for privileged apps, such as **Bitwarden** and **KeePassDX**.</string>
     <string name="PasskeyUnsupportedTitle">Unsupported password manager</string>
@@ -323,8 +341,8 @@
     <string name="BackAnimationSpring">Spring</string>
     <string name="BackAnimationPredictive">Predictive</string>
     <string name="AddToFilter">Add to Filter</string>
-    <string name="UnifiedPushNeverReceivedNotifications">You never received notifications with UnifiedPush since Nagram X was started.</string>
-    <string name="UnifiedPushLastReceivedNotification">The last received notification with UnifiedPush was %1$d seconds ago.\n\nYou received %2$d notifications since Nagram X was started.</string>
+    <string name="UnifiedPushNeverReceivedNotifications">You never received notifications with UnifiedPush since AliGram was started.</string>
+    <string name="UnifiedPushLastReceivedNotification">The last received notification with UnifiedPush was %1$d seconds ago.\n\nYou received %2$d notifications since AliGram was started.</string>
     <string name="UnifiedPushCurrentEndpoint">The current UnifiedPush endpoint is: %1$s</string>
     <string name="PlayOnce">Play once</string>
     <string name="StorageSettings">Storage</string>
