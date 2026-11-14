@@ -3,7 +3,16 @@ import org.gradle.internal.os.OperatingSystem
 
 plugins {
     id 'com.android.application'
-    id 'com.google.gms.google-services'
+    // NOTE (AliGram): the Google Services plugin is intentionally NOT applied.
+    // It reads TMessagesProj/google-services.json and fails the build when no
+    // client matches the applicationId — the upstream file only has a client
+    // for nu.gpu.nagram, and AliGram (app.aligram) has no Firebase project
+    // yet. Do NOT add a fabricated client entry: that would invent Firebase
+    // credentials. Re-apply this plugin only when AliGram has a real Firebase
+    // project and a real google-services.json client for app.aligram.
+    // Until then FCM and Crashlytics mapping upload are inert by design
+    // (Crashlytics collection is already forced off in AndroidUtil, and the
+    // getInstance() call below is guarded against a missing default app).
     id 'com.google.firebase.crashlytics'
 }
 
