@@ -1293,6 +1293,86 @@ public class AliGramRoomIntegrationTest {
     }
 
     // ------------------------------------------------------------------
+    // Scenario 12b — diagnostic probe (Phase 3.2): isolate WHY scenario
+    // 12's trigger-aborted claim did NOT roll back on CI run 43634264861
+    // even though the claim runs inside db.runInTransaction (the
+    // helper). Pure SQLite rolls this back correctly — verified locally
+    // with Python's sqlite3 3.45.1 (BEGIN IMMEDIATE; UPDATE w1 -> COPYING;
+    // UPDATE w2 aborted by the trigger; ROLLBACK; w1 is ENQUEUED again).
+    // So the engine semantics are sound and the breakage is in the
+    // Room/Robolectric layer, not the trigger or the helper.
+    //
+    // Minimal form, no WHEN subquery: ONE row, an unconditional BEFORE
+    // UPDATE trigger that aborts ANY COPYING update, plus a probe of
+    // inTransaction() inside the transaction. Outcomes distinguish:
+    //   - trigger fires + inTx true + row ENQUEUED
+    //       => transactions hold for trigger aborts; scenario 12's
+    //       failure is specific to its two-row WHEN-subquery setup.
+    //   - trigger fires + inTx true + row COPYING
+    //       => the trigger abort bypasses the transaction in this
+    //       Robolectric harness; scenario 12's trigger injection is
+    //       invalid HERE and its rollback property must be proven by
+    //       another injection (5(b) + scenario 11 already cover the
+    //       mechanism and the concurrency invariant).
+    //   - inTx false
+    //       => beginTransaction was a no-op on this connection.
+    // Steps: https://github.com/tedfoagen-stack/AliGram/actions/runs/43634264861
+    // (72 tests, 1 failed — scenario 12, ComparisonFailure at :1276).
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario12b_triggerAbortTransactionProbe() throws Exception {
+        final long id = onDb(() -> db.preservedRefDao().insertRef(
+                newRef(USER_0, ACCOUNT_0, DIALOG_A, 77, "LIVE", 0,
+                        AliGramEligibility.STATE_ENQUEUED, "probe.mp4")));
+        onDb(() -> {
+            db.getOpenHelper().getWritableDatabase().execSQL(
+                    "CREATE TRIGGER aligram_probe_abort "
+                    + "BEFORE UPDATE OF state ON PreservedRef "
+                    + "WHEN NEW.state = 'COPYING' "
+                    + "BEGIN SELECT RAISE(ABORT, 'aligram-probe'); END");
+            return null;
+        });
+        // The trigger must exist on the connection the claim uses.
+        final int triggerCount = onDb(() -> {
+            final android.database.Cursor c = db.getOpenHelper().getWritableDatabase()
+                    .query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                            new Object[]{"aligram_probe_abort"});
+            try {
+                c.moveToFirst();
+                return c.getInt(0);
+            } finally {
+                c.close();
+            }
+        });
+        assertEquals("probe trigger was not created", 1, triggerCount);
+
+        final AtomicBoolean inTx = new AtomicBoolean(false);
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        try {
+            onDb(() -> db.runInTransaction(() -> {
+                inTx.set(db.getOpenHelper().getWritableDatabase().inTransaction());
+                final PreservedRef row = db.preservedRefDao().getRefById(id);
+                row.state = AliGramEligibility.STATE_COPYING;
+                db.preservedRefDao().updateRef(row);
+                return null;
+            }));
+            fail("probe UPDATE must throw when the trigger aborts it");
+        } catch (ExecutionException e) {
+            thrown.set(e.getCause());
+        }
+        assertNotNull("probe UPDATE threw nothing", thrown.get());
+        assertTrue("probe trigger did not fire: " + thrown.get(),
+                thrown.get().getMessage() != null
+                        && thrown.get().getMessage().contains("aligram-probe"));
+        assertTrue("runInTransaction did not begin a transaction on this connection",
+                inTx.get());
+        assertEquals("probe row was NOT rolled back: the trigger abort bypassed the transaction in this harness",
+                AliGramEligibility.STATE_ENQUEUED,
+                onDb(() -> db.preservedRefDao().getRefById(id)).state);
+    }
+
+    // ------------------------------------------------------------------
     // Scenario 13 — sequential double claim is a no-op (baseline).
     //
     // Pins the DAO javadoc ("a second delivery finds no waiting rows

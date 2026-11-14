@@ -87,10 +87,16 @@ jobs:
       - name: Collect Room generated sources
         # Phase 3.2 (§11.6): surface Room's generated DAO code so the
         # claimJobsForFile @Transaction wrapping can be read directly.
+        # Runs even when the tests fail: the generated sources are the
+        # evidence for diagnosing a red run.
+        if: always()
         run: |
           echo "Room-generated DAO implementations for the AliGram package:"
           find TMessagesProj/build/generated -name '*Dao_Impl.java' -path '*aligram*' -print || true
       - name: Upload Room generated sources
+        # if: always() so a red test run still uploads the generated
+        # sources (the compile that produced them ran before the tests).
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: AliGram-Room-Generated
