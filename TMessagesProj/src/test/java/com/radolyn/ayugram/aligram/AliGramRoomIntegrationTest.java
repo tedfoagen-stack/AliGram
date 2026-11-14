@@ -1492,6 +1492,75 @@ public class AliGramRoomIntegrationTest {
     }
 
     // ------------------------------------------------------------------
+    // Scenario 12e — diagnostic probe (Phase 3.2): the same claim as
+    // scenario 12 (SELECT + two updates, trigger aborts the second),
+    // but nested inside an OUTER runInTransaction — the composition
+    // 5(b) already proves for constraint failures.
+    //
+    // If the harness bug is "the claim's SELECT ends the helper's
+    // transaction", the OUTER transaction may still be alive when the
+    // trigger aborts, and its ROLLBACK would save the first row.
+    //   - PASS => the claim composes inside an outer transaction even
+    //     for trigger aborts; scenario 12 can be rewritten in this
+    //     nested form (the production-relevant composition), and the
+    //     bare-helper form stays a documented harness limitation.
+    //   - FAIL => the SELECT + trigger abort ends every ambient
+    //     transaction in this harness; scenario 12 is removed and the
+    //     property stays covered by 12c + 12d + 5(b) + 11 + the engine
+    //     experiment.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario12e_nestedOuterTransactionSavesTriggerAbortedClaim() throws Exception {
+        final String trigger = "aligram_claim_test_abort";
+        final long[] ids = seedClaimJobsStandalone("shared.mp4");
+        onDb(() -> {
+            db.getOpenHelper().getWritableDatabase().execSQL(
+                    "CREATE TRIGGER " + trigger + " "
+                    + "BEFORE UPDATE OF state ON PreservedRef "
+                    + "WHEN NEW.state = 'COPYING' "
+                    + "AND (SELECT COUNT(*) FROM PreservedRef WHERE state = 'COPYING') >= 1 "
+                    + "BEGIN SELECT RAISE(ABORT, 'aligram-test: abort second COPYING update'); END");
+            return null;
+        });
+        final long waiting1 = ids[0];
+        final long waiting2 = ids[1];
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        try {
+            onDb(() -> db.runInTransaction(() -> {
+                PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4");
+                return null;
+            }));
+            fail("claim must throw when its second COPYING update aborts");
+        } catch (ExecutionException e) {
+            thrown.set(e.getCause());
+        }
+        try {
+            assertNotNull("claim threw nothing", thrown.get());
+            assertTrue("the abort did not propagate",
+                    thrown.get().getMessage() != null
+                            && thrown.get().getMessage().contains("aligram-test"));
+            assertEquals("first claimed row was NOT rolled back",
+                    AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
+            assertEquals("second row must stay DOWNLOADING (its update aborted)",
+                    AliGramEligibility.STATE_DOWNLOADING,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting2)).state);
+        } finally {
+            try {
+                onDb(() -> {
+                    db.getOpenHelper().getWritableDatabase()
+                            .execSQL("DROP TRIGGER IF EXISTS " + trigger);
+                    return null;
+                });
+            } catch (Exception ignored) {
+                // The DB is per-test in-memory; a leftover trigger dies with it.
+            }
+            cleanupClaimJobs(ids);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Scenario 13 — sequential double claim is a no-op (baseline).
     //
     // Pins the DAO javadoc ("a second delivery finds no waiting rows
