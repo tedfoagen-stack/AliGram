@@ -9,6 +9,7 @@ import android.text.TextUtils;
 import com.radolyn.ayugram.messages.AyuSavePreferences;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.DispatchQueue;
@@ -80,6 +81,9 @@ public final class AliGramPreservation {
     private static final ConcurrentHashMap<String, Long> pinnedPathMirror = new ConcurrentHashMap<>();
     /** File-name mirror for the UI-thread cancel filter (no DAO on the UI thread). */
     private static final ConcurrentHashMap<String, Long> pinnedNameMirror = new ConcurrentHashMap<>();
+
+    /** In-flight H-I downloads, keyed by pendingKey(account, expectedFileName) — the H-C fan-out set. */
+    private static final ConcurrentHashMap<String, PendingLoad> pendingLoads = new ConcurrentHashMap<>();
 
     /** Captured-delete notes, keyed {@code account|dialogId|messageId} (snapshot → mark ordering). */
     private static final ConcurrentHashMap<String, Long> capturedDeletes = new ConcurrentHashMap<>();

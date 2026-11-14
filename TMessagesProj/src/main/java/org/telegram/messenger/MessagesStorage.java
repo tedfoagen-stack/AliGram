@@ -12094,6 +12094,14 @@ public class MessagesStorage extends BaseController {
                 state_tasks = null;
                 int minDeleteTime = Integer.MAX_VALUE;
 
+                // --- AliGram hook (H-I pre-existence probes, Phase 2.3 §1.2):
+                // the REPLACE pass below writes the rows, so each probe must
+                // run before its row is written. The ingest hook lives in the
+                // second pass below (after the auto-download block), and both
+                // passes iterate the same `messages` list in the same order, so
+                // the probe results are stashed per index here and consumed there.
+                Boolean[] aligramPreExistingByIndex = new Boolean[messages.size()];
+
                 for (int a = 0; a < messages.size(); a++) {
                     TLRPC.Message message = messages.get(a);
                     fixUnsupportedMedia(message);
@@ -12111,6 +12119,7 @@ public class MessagesStorage extends BaseController {
                     } catch (Throwable e) {
                         FileLog.e(e);
                     }
+                    aligramPreExistingByIndex[a] = aligramPreExisting;
 
                     int messageId = message.id;
                     MessageObject.getDialogId(message);
@@ -12824,6 +12833,7 @@ public class MessagesStorage extends BaseController {
                     try {
                         boolean aligramArchived = getDialogFolderIdInternal(message.dialog_id) == 1;
                         boolean aligramChannelPostOk = message.peer_id == null || message.peer_id.channel_id == 0 || message.post;
+                        Boolean aligramPreExisting = aligramPreExistingByIndex[a];
                         AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting, aligramArchived, aligramChannelPostOk);
                     } catch (Throwable e) {
                         FileLog.e(e);
