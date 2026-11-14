@@ -279,6 +279,12 @@ dependencies {
     implementation 'app.nekogram.translator:translator:1.6.1'
     // add for AliGram preservation unit tests (deterministic JVM tests)
     testImplementation 'junit:junit:4.13.2'
+    // add for AliGram Room integration tests (real Room + Robolectric; Room
+    // version MUST match room-runtime above, Robolectric 4.17 supports
+    // SDK 37 / Gradle 9 / AGP 9 / JDK 21)
+    testImplementation 'androidx.room:room-testing:2.8.4'
+    testImplementation 'org.robolectric:robolectric:4.17'
+    testImplementation 'androidx.test:core:1.6.1'
 
     compileOnly fileTree('libs')
 }
