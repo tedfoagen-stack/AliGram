@@ -1003,4 +1003,310 @@ public class AliGramRoomIntegrationTest {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Scenario 11 — concurrent claims claim each job exactly once.
+    //
+    // THE missing check for claimJobsForFile atomicity (Phase 3.1 report
+    // §11 item 6, Phase 3.2 investigation phase3-2-claim-atomicity.md):
+    // N threads claim the same file at the same time behind a start
+    // gate. Exactly one caller must win each waiting job: the union of
+    // all returned lists must be exactly the seeded set, with no
+    // duplicate refId anywhere. The claim call is retried on a
+    // transient SQLite busy/locked failure (same bounded-retry pattern
+    // as scenario 4): Robolectric's shadow SQLite throws SQLITE_BUSY
+    // under thread contention, and that contention mode is NOT the
+    // atomicity property under test — the production callers of
+    // claimJobsForFile are single-threaded, so a busy failure here
+    // would be a test-harness artefact, not a product defect. A retry
+    // re-claims only still-waiting jobs, so it cannot mask a double
+    // claim: a duplicated refId would still appear in the union. The
+    // claim is repeated for 10 rounds (re-seeded each round) because a
+    // single round can miss a rare interleave.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario11_concurrentClaimsClaimEachJobExactlyOnce() throws Exception {
+        final int threads = 8;
+        final int rounds = 10;
+        final String fileName = "shared.mp4";
+        List<String> failures = new ArrayList<>();
+        for (int round = 0; round < rounds; round++) {
+            final long[] ids = seedClaimJobs(fileName);
+            final long waiting1 = ids[0];
+            final long waiting2 = ids[1];
+            final long waiting3 = ids[2];
+            final long alreadyCopying = ids[3];
+            final long otherFile = ids[4];
+
+            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            CountDownLatch startGate = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(threads);
+            List<List<Long>> claimedPerThread = new ArrayList<>();
+            List<Throwable> errors = new ArrayList<>();
+            try {
+                for (int i = 0; i < threads; i++) {
+                    pool.submit(() -> {
+                        try {
+                            startGate.await(30, TimeUnit.SECONDS);
+                            // Direct DAO call from a pool thread (same
+                            // pattern as scenario 4): never via the
+                            // single-thread onDb executor, which would
+                            // serialize the calls and defeat the test.
+                            List<PreservedRef> claimed = null;
+                            RuntimeException lastBusy = null;
+                            for (int attempt = 0; attempt < 30; attempt++) {
+                                try {
+                                    claimed = db.preservedRefDao()
+                                            .claimJobsForFile(ACCOUNT_0, fileName);
+                                    lastBusy = null;
+                                    break;
+                                } catch (RuntimeException e) {
+                                    String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+                                    if (msg.contains("locked") || msg.contains("busy")) {
+                                        lastBusy = e;
+                                        try {
+                                            Thread.sleep(5L);
+                                        } catch (InterruptedException ie) {
+                                            Thread.currentThread().interrupt();
+                                            break;
+                                        }
+                                    } else {
+                                        throw e;
+                                    }
+                                }
+                            }
+                            if (lastBusy != null) {
+                                throw lastBusy;
+                            }
+                            List<Long> got = new ArrayList<>();
+                            if (claimed != null) {
+                                for (PreservedRef r : claimed) {
+                                    got.add(r.refId);
+                                }
+                            }
+                            synchronized (claimedPerThread) {
+                                claimedPerThread.add(got);
+                            }
+                        } catch (Throwable t) {
+                            synchronized (errors) {
+                                errors.add(t);
+                            }
+                        } finally {
+                            done.countDown();
+                        }
+                    });
+                }
+                startGate.countDown();
+                if (!done.await(60, TimeUnit.SECONDS)) {
+                    failures.add("round " + round + ": concurrent claims did not finish in time");
+                    continue;
+                }
+            } finally {
+                pool.shutdownNow();
+                pool.awaitTermination(10, TimeUnit.SECONDS);
+            }
+            if (!errors.isEmpty()) {
+                failures.add("round " + round + ": claim threw under contention: " + errors);
+                cleanupClaimJobs(ids);
+                continue;
+            }
+            List<Long> allClaimed = new ArrayList<>();
+            for (List<Long> got : claimedPerThread) {
+                allClaimed.addAll(got);
+            }
+            List<Long> union = new ArrayList<>(new java.util.HashSet<>(allClaimed));
+            List<Long> expected = new ArrayList<>();
+            expected.add(waiting1);
+            expected.add(waiting2);
+            expected.add(waiting3);
+            java.util.Collections.sort(union);
+            java.util.Collections.sort(expected);
+            if (allClaimed.size() != 3 || !union.equals(expected)) {
+                failures.add("round " + round + ": expected exactly the 3 waiting jobs claimed "
+                        + "once each, got claimed=" + allClaimed + " union=" + union);
+            }
+            // Final states: the three waiting jobs are COPYING; the
+            // already-COPYING control is untouched; the other-file
+            // control is still ENQUEUED (claim is scoped by file name).
+            assertEquals(AliGramEligibility.STATE_COPYING,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
+            assertEquals(AliGramEligibility.STATE_COPYING,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting2)).state);
+            assertEquals(AliGramEligibility.STATE_COPYING,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting3)).state);
+            assertEquals(AliGramEligibility.STATE_COPYING,
+                    onDb(() -> db.preservedRefDao().getRefById(alreadyCopying)).state);
+            assertEquals(AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(otherFile)).state);
+            cleanupClaimJobs(ids);
+        }
+        assertTrue("concurrent claim failures: " + failures, failures.isEmpty());
+    }
+
+    /**
+     * Seeds one claim fixture: three waiting jobs for {@code fileName}
+     * (ENQUEUED, DOWNLOADING, PINNED — all three states
+     * {@code getWaitingJobsForFile} matches), one already-COPYING control
+     * for the same file, one ENQUEUED control for a different file.
+     * Returns the five refIds in that order. Runs on the DB worker thread.
+     */
+    private long[] seedClaimJobs(String fileName) throws Exception {
+        return onDb(() -> {
+            PreservedRefDao dao = db.preservedRefDao();
+            long w1 = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 31, "LIVE", 0,
+                    AliGramEligibility.STATE_ENQUEUED, fileName));
+            long w2 = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 32, "LIVE", 0,
+                    AliGramEligibility.STATE_DOWNLOADING, fileName));
+            long w3 = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 33, "LIVE", 0,
+                    AliGramEligibility.STATE_PINNED, fileName));
+            long copying = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 34, "LIVE", 0,
+                    AliGramEligibility.STATE_COPYING, fileName));
+            long other = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 35, "LIVE", 0,
+                    AliGramEligibility.STATE_ENQUEUED, "other.mp4"));
+            return new long[]{w1, w2, w3, copying, other};
+        });
+    }
+
+    /**
+     * Seeds a claim fixture for the standalone-rollback scenario: two
+     * waiting jobs for {@code fileName} (ENQUEUED, DOWNLOADING) and one
+     * ENQUEUED control for a different file. Deliberately NO
+     * already-COPYING control (unlike {@link #seedClaimJobs}): the
+     * fault-injection trigger in scenario 12 counts COPYING rows, and a
+     * pre-existing COPYING row would make it fire on the FIRST update,
+     * so the test would pass vacuously even with no transaction.
+     * Returns the three refIds in that order.
+     */
+    private long[] seedClaimJobsStandalone(String fileName) throws Exception {
+        return onDb(() -> {
+            PreservedRefDao dao = db.preservedRefDao();
+            long w1 = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 31, "LIVE", 0,
+                    AliGramEligibility.STATE_ENQUEUED, fileName));
+            long w2 = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 32, "LIVE", 0,
+                    AliGramEligibility.STATE_DOWNLOADING, fileName));
+            long other = dao.insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 35, "LIVE", 0,
+                    AliGramEligibility.STATE_ENQUEUED, "other.mp4"));
+            return new long[]{w1, w2, other};
+        });
+    }
+
+    private void cleanupClaimJobs(long[] ids) throws Exception {
+        onDbVoid(() -> {
+            PreservedRefDao dao = db.preservedRefDao();
+            for (long id : ids) {
+                dao.deleteRefById(id);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario 12 — a mid-claim failure rolls back the claim itself,
+    // with NO outer transaction.
+    //
+    // This is the test scenario 5(b) is NOT: the claim runs standalone,
+    // so only its own @Transaction can save it. Fault injection without
+    // touching production code: a BEFORE UPDATE trigger aborts the
+    // SECOND COPYING update of the fixture (the WHEN clause counts the
+    // COPYING rows already written on this connection: 0 before the
+    // first update, 1 before the second). The abort must propagate out
+    // of claimJobsForFile, and BOTH rows must still be ENQUEUED
+    // afterwards. If @Transaction is ignored for the default method,
+    // the first UPDATE has already committed (autocommit) and the first
+    // row stays COPYING — the test fails with exactly that diagnosis.
+    // The trigger lives only on this test's fresh in-memory DB and is
+    // dropped in the finally block.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario12_standaloneClaimRollsBackMidClaimFailure() throws Exception {
+        final String trigger = "aligram_claim_test_abort";
+        final long[] ids = seedClaimJobsStandalone("shared.mp4");
+        final long waiting1 = ids[0];
+        final long waiting2 = ids[1];
+        final long otherFile = ids[2];
+        try {
+            onDb(() -> {
+                db.getOpenHelper().getWritableDatabase().execSQL(
+                        "CREATE TRIGGER " + trigger + " "
+                                + "BEFORE UPDATE OF state ON PreservedRef "
+                                + "WHEN NEW.state = 'COPYING' "
+                                + "AND (SELECT COUNT(*) FROM PreservedRef WHERE state = 'COPYING') >= 1 "
+                                + "BEGIN "
+                                + "SELECT RAISE(ABORT, 'aligram-test: abort second COPYING update'); "
+                                + "END");
+                return null;
+            });
+
+            // Standalone claim — deliberately NOT wrapped in
+            // db.runInTransaction (that is what scenario 5(b) did, and
+            // it is why 5(b) cannot prove this).
+            AtomicReference<Throwable> thrown = new AtomicReference<>();
+            try {
+                onDb(() -> db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
+                fail("claim must throw when its second COPYING update aborts");
+            } catch (ExecutionException e) {
+                thrown.set(e.getCause());
+            }
+            assertNotNull("claim threw nothing; trigger did not fire?", thrown.get());
+            assertTrue("expected a SQLite error from the trigger, got "
+                    + thrown.get().getClass().getName() + ": " + thrown.get().getMessage(),
+                    thrown.get() instanceof android.database.sqlite.SQLiteException
+                            || (thrown.get().getMessage() != null
+                            && thrown.get().getMessage().contains("aligram-test")));
+
+            // Rollback assertion: with a real @Transaction wrapper both
+            // rows are ENQUEUED again; without one the first row is
+            // COPYING (its UPDATE committed in autocommit).
+            assertEquals("first claimed row was NOT rolled back: @Transaction is not "
+                    + "in effect for the claimJobsForFile default method",
+                    AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
+            assertEquals(AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(waiting2)).state);
+            assertEquals("other-file control must stay ENQUEUED (claim is scoped by file name)",
+                    AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(otherFile)).state);
+        } finally {
+            try {
+                onDb(() -> {
+                    db.getOpenHelper().getWritableDatabase()
+                            .execSQL("DROP TRIGGER IF EXISTS " + trigger);
+                    return null;
+                });
+            } catch (Exception ignored) {
+                // The DB is per-test in-memory; a leftover trigger dies with it.
+            }
+            cleanupClaimJobs(ids);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario 13 — sequential double claim is a no-op (baseline).
+    //
+    // Pins the DAO javadoc ("a second delivery finds no waiting rows
+    // and is a no-op") as a standalone assertion: claim once, get both
+    // jobs; claim again, get an empty list; states unchanged. This is
+    // the sequential baseline the concurrent scenario 11 compares
+    // against — if 13 passes and 11 fails, the failure is purely a
+    // concurrency property, not a logic error in the claim itself.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario13_sequentialDoubleClaimIsNoop() throws Exception {
+        final long[] ids = seedClaimJobs("shared.mp4");
+        List<PreservedRef> first = onDb(() ->
+                db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
+        assertEquals(3, first.size());
+        assertEquals(AliGramEligibility.STATE_COPYING,
+                onDb(() -> db.preservedRefDao().getRefById(ids[0])).state);
+        assertEquals(AliGramEligibility.STATE_COPYING,
+                onDb(() -> db.preservedRefDao().getRefById(ids[1])).state);
+        assertEquals(AliGramEligibility.STATE_COPYING,
+                onDb(() -> db.preservedRefDao().getRefById(ids[2])).state);
+        List<PreservedRef> second = onDb(() ->
+                db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
+        assertTrue("second claim must find no waiting rows", second.isEmpty());
+        cleanupClaimJobs(ids);
+    }
 }

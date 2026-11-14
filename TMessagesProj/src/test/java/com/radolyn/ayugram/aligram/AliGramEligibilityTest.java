@@ -479,9 +479,16 @@ public class AliGramEligibilityTest {
 
     @Test
     public void h9_3_sentScheduledDeleteTouchesNeitherRowNorFile() {
-        // A remote scheduled delete of an already-sent message travels the
-        // sent_messages list, which never reaches MessagesStorage: neither
-        // the messages_v2 row nor its file is touched by this path.
+        // Phase 3.2 (sent_messages re-check, phase3-2-sent-messages.md):
+        // sent_messages is NOT a table — it is an optional Vector<int>
+        // of message IDs inside TL_updateDeleteScheduledMessages, used
+        // only for the "VideoConversionDone" notification; it never
+        // reaches MessagesStorage and cannot carry media, so it can
+        // delete neither rows nor files. This test pins the model only:
+        // the scheduled-delete branch itself is SQL-only (no files).
+        // The premise that a remote delete of an already-sent scheduled
+        // message travels this update is unproven (Q1–Q3 need a device
+        // probe); worst case is an orphaned anchor, never media loss.
         assertFalse(modelDeletesFiles(MODE_SCHEDULED));
     }
 
