@@ -86,6 +86,23 @@ public final class AliGramEligibility {
         return activationTime > 0;
     }
 
+    /**
+     * R-7 stamping decision (Phase 3.1 — the 30-second Connected-only
+     * fallback was REMOVED because Connected alone cannot guarantee
+     * trustworthy time). A PENDING activation may be stamped only when,
+     * in this process, the connection is Connected AND at least one
+     * server-originated round (getDifference / updates) has completed.
+     * Either condition alone is insufficient: Connected can be set on the
+     * first valid data before the handshake recomputes
+     * {@code timeDifference}, and a completed update batch proves
+     * nothing if it was synthesised locally. There is no fallback — a
+     * PENDING activation simply stays PENDING (gate closed) until both
+     * hold. See {@code ~/workspace/aligram/phase3-1-r7-note.md}.
+     */
+    public static boolean mayStampActivation(boolean connected, boolean serverRoundSeenInProcess) {
+        return connected && serverRoundSeenInProcess;
+    }
+
     /** The H-I gate is open only for a STAMPED record with a valid time. */
     public static boolean isGateOpen(ActivationState state, int activationTime) {
         return state == ActivationState.STAMPED && isValidActivationTime(activationTime);

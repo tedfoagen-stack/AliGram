@@ -21503,10 +21503,20 @@ public class MessagesController extends BaseController implements NotificationCe
         // a successful getDifference / updates batch. Stamping a PENDING
         // activation requires this event in the current process, never a
         // restored timeDifference alone (Phase 2.3 §1.5 + phase3 §3.5).
-        try {
-            AliGramPreservation.onServerRoundCompleted(currentAccount);
-        } catch (Throwable e) {
-            FileLog.e(e);
+        //
+        // Phase 3.1: ONLY for server-originated batches. processUpdateArray
+        // is also called with locally synthesised read-state updates built
+        // from cache (MessagesController:7563, :7791, :7805 — date == 0,
+        // fromGetDifference == false), which prove no server contact and
+        // must never set roundSeen. Server batches arrive either from
+        // getDifference (fromGetDifference == true, date == 0) or from
+        // processUpdates (fromGetDifference == false, date == server time).
+        if (fromGetDifference || date != 0) {
+            try {
+                AliGramPreservation.onServerRoundCompleted(currentAccount);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
         }
 
         return true;

@@ -65,17 +65,14 @@ public final class AliGramPreservation {
     private static final String STATE_STAMPED = "STAMPED";
     private static final String STATE_OFF = "OFF";
 
-    /** Fallback stamp delay when Connected is seen but no server round yet (R-A9 §3.5). */
-    private static final long STAMP_FALLBACK_DELAY_MS = 30_000L;
+    /** Watchdog probes for the R-19 second wake-up (max probes per job). */
     private static final int MAX_WATCHDOG_PROBES = 2;
 
     // --- Queues / mirrors / in-flight state (all process-local) ---
     /** Single-thread queue owning byte copies and the delete gate (Phase 2.3 §2.2). Never exposed. */
     private static final DispatchQueue copyQueue = new DispatchQueue("aligramCopyQueue");
     private static final ConcurrentHashMap<Integer, Boolean> startupDone = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Integer, Boolean> connectedSeen = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Integer, Boolean> roundSeen = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Integer, Boolean> stampFallbackScheduled = new ConcurrentHashMap<>();
 
     /** In-memory pin mirror: absolute path → refId (durable row is authoritative). */
     private static final ConcurrentHashMap<String, Long> pinnedPathMirror = new ConcurrentHashMap<>();
@@ -240,12 +237,20 @@ public final class AliGramPreservation {
 
     /**
      * PENDING → STAMPED transition. Requires, in this process: the
-     * connection state is Connected AND at least one server round
-     * (processUpdateArray) has completed — R-7: never stamp from a
-     * restored timeDifference alone. If only Connected is seen, schedule
-     * one fallback stamp after 30 s (logged as a warning, per
-     * phase3-investigations §3.5). Never accepts A ≤ 0; never uses device
-     * time as a fallback (device time is stored for diagnostics only).
+     * connection state is Connected AND at least one server-originated
+     * round (getDifference / updates) has completed — R-7: never stamp
+     * from a restored timeDifference alone, and never from Connected
+     * alone. There is NO fallback: the 30 s Connected-only fallback was
+     * REMOVED in Phase 3.1 because Connected cannot guarantee trustworthy
+     * time (see ~/workspace/aligram/phase3-1-r7-note.md — Connected is
+     * set on the first valid data on a generic connection,
+     * ConnectionsManager.cpp:885, which can precede the handshake that
+     * recomputes timeDifference, and reconnects reuse sessions without
+     * any new handshake). If the conditions are not met the activation
+     * simply stays PENDING and preservation stays disabled — a late
+     * activation is safe, an early one enrols pre-activation messages.
+     * Never accepts A ≤ 0; never uses device time as a fallback
+     * (device time is stored for diagnostics only).
      */
     public static void maybeStampPending(int account) {
         try {
@@ -253,37 +258,26 @@ public final class AliGramPreservation {
             try {
                 connected = ConnectionsManager.getInstance(account).getConnectionState()
                         == ConnectionsManager.ConnectionStateConnected;
-                if (connected) {
-                    connectedSeen.put(account, Boolean.TRUE);
-                }
             } catch (Throwable ignored) {
             }
             boolean round = Boolean.TRUE.equals(roundSeen.get(account));
-            if (connected && round) {
-                stampPendingNow(account, false);
+            if (AliGramEligibility.mayStampActivation(connected, round)) {
+                stampPendingNow(account);
                 return;
             }
-            if (connected && !round && stampFallbackScheduled.putIfAbsent(account, Boolean.TRUE) == null) {
-                copyQueue.postRunnable(() -> {
-                    stampFallbackScheduled.remove(account);
-                    try {
-                        if (Boolean.TRUE.equals(roundSeen.get(account))) {
-                            stampPendingNow(account, false);
-                        } else {
-                            FileLog.d(TAG + ": stamping on Connected alone (no server round in 30s) — warning, R-A9 fallback");
-                            stampPendingNow(account, true);
-                        }
-                    } catch (Throwable e) {
-                        FileLog.e(TAG + ": fallback stamp failed", e);
-                    }
-                }, STAMP_FALLBACK_DELAY_MS);
+            // No fallback exists any more: staying PENDING is the safe
+            // state. Log why, so a stuck PENDING is diagnosable.
+            if (connected && !round) {
+                FileLog.d(TAG + ": activation stays PENDING — Connected but no server-originated round yet in this process (R-7, no fallback)");
+            } else if (!connected) {
+                FileLog.d(TAG + ": activation stays PENDING — not Connected (R-7)");
             }
         } catch (Throwable e) {
             FileLog.e(TAG + ": maybeStampPending failed", e);
         }
     }
 
-    private static void stampPendingNow(int account, boolean fallbackOnly) {
+    private static void stampPendingNow(int account) {
         SharedPreferences prefs = prefsFor(account);
         Map<String, ?> all = prefs.getAll();
         List<String> pendingKeys = new ArrayList<>();
@@ -315,26 +309,28 @@ public final class AliGramPreservation {
         }
         editor.apply();
         FileLog.d(TAG + ": stamped " + pendingKeys.size() + " pending activation(s) at server time "
-                + serverNow + (fallbackOnly ? " (Connected-only fallback)" : ""));
+                + serverNow);
     }
 
-    /** Called from the end of MessagesController.processUpdateArray: a server round completed. */
+    /**
+     * Called from the end of {@code MessagesController.processUpdateArray}
+     * for SERVER-ORIGINATED batches only (the call site gates on
+     * {@code fromGetDifference || date != 0}): a completed getDifference /
+     * updates round proves, in this process, that the session is live and
+     * the server accepted our clock (a wrong timeDifference would be
+     * rejected with bad_msg_id / bad_server_salt and corrected by the
+     * native handlers). Locally synthesised batches (read-state updates
+     * built from cache, {@code date == 0} and not from getDifference) do
+     * NOT call this — they prove no server contact and must never set
+     * {@code roundSeen} (Phase 3.1 hardening of the R-7 signal; see
+     * phase3-1-r7-note.md §4).
+     */
     public static void onServerRoundCompleted(int account) {
         try {
             roundSeen.put(account, Boolean.TRUE);
             maybeStampPending(account);
         } catch (Throwable e) {
             FileLog.e(TAG + ": onServerRoundCompleted failed", e);
-        }
-    }
-
-    /** Called when the connection state changes to Connected (best-effort stamp trigger). */
-    public static void onConnectionStateChanged(int account) {
-        try {
-            connectedSeen.put(account, Boolean.TRUE);
-            maybeStampPending(account);
-        } catch (Throwable e) {
-            FileLog.e(TAG + ": onConnectionStateChanged failed", e);
         }
     }
 
@@ -1341,7 +1337,18 @@ public final class AliGramPreservation {
     // Deferred delete (Phase 2.3 §2.2) — Layer 1 / Layer 2 support
     // ==================================================================
 
-    /** Record a deferred-delete request (INSERT OR IGNORE on the unique key). */
+    /**
+     * Record a deferred-delete request (INSERT OR IGNORE on the unique key).
+     *
+     * <p>Phase 3.1: the {@code refId} is validated against the durable row.
+     * Both record paths resolve it through a path-keyed mirror
+     * ({@code pinnedPathMirror}, shared across accounts because cache
+     * paths can be shared), so it may belong to another account's ref.
+     * A foreign or dangling refId is never stored — it would let one
+     * account's release sweep another account's rows. It degrades to 0
+     * (unattributed): the row is then released only by the account
+     * startup sweep, which re-validates the pin per path.
+     */
     public static void recordDeferredDelete(int account, long refId, String absolutePath,
                                             long sizeAtPin, long mtimeAtPin,
                                             String requestedBy, boolean cancelDeferred) {
@@ -1352,6 +1359,17 @@ public final class AliGramPreservation {
             DeferredDeleteDao dao = AliGramData.deferredDao();
             if (dao == null) {
                 return;
+            }
+            if (refId != 0) {
+                try {
+                    PreservedRefDao refDao = AliGramData.refDao();
+                    PreservedRef pin = refDao == null ? null : refDao.getRefById(refId);
+                    if (pin == null || pin.accountId != account) {
+                        refId = 0; // foreign / dangling mirror entry: unattributed
+                    }
+                } catch (Throwable ignored) {
+                    refId = 0;
+                }
             }
             DeferredDelete row = new DeferredDelete();
             row.accountId = account;
@@ -1432,45 +1450,70 @@ public final class AliGramPreservation {
      * the ref's terminal transition has committed. Re-checks that no other
      * active pin covers the path and re-validates size+mtime (H-6): on a
      * mismatch the row is marked DONE without deleting.
+     *
+     * <p>Phase 3.1 scoping: {@code refId == 0} returns immediately — every
+     * unattributed row shares refId 0, and releasing "for ref 0" would
+     * sweep them all, across dialogs and accounts. Rows are fetched with
+     * the account-scoped {@code getPendingForRef(account, refId)}, so a
+     * foreign refId can never release this account's rows.
      */
     public static void releaseDeferredDeletesForRef(int account, long refId) {
+        try {
+            if (refId == 0) {
+                return; // unattributed rows: startup sweep only, never by ref
+            }
+            DeferredDeleteDao dao = AliGramData.deferredDao();
+            if (dao == null) {
+                return;
+            }
+            List<DeferredDelete> rows = dao.getPendingForRef(account, refId);
+            if (rows == null) {
+                return;
+            }
+            for (DeferredDelete row : rows) {
+                releaseDeferredRow(account, row);
+            }
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": releaseDeferredDeletesForRef failed", e);
+        }
+    }
+
+    /**
+     * Release one PENDING deferred row: skip it while any active pin still
+     * covers the path (another dialog/account may pin the same file),
+     * otherwise delete the file when size+mtime still match the pin and
+     * mark the row DONE (DONE on mismatch / already-gone too — the
+     * request is settled either way). Shared by the per-ref release and
+     * the startup sweep, so the two paths cannot drift apart.
+     */
+    private static void releaseDeferredRow(int account, DeferredDelete row) {
         try {
             DeferredDeleteDao dao = AliGramData.deferredDao();
             PreservedRefDao refDao = AliGramData.refDao();
             if (dao == null || refDao == null) {
                 return;
             }
-            List<DeferredDelete> rows = dao.getPendingForRef(refId);
-            if (rows == null) {
-                return;
+            List<PreservedRef> active = refDao.getActivePinsForPath(row.absolutePath);
+            if (active != null && !active.isEmpty()) {
+                return; // another active pin covers the path; released when it terminates
             }
-            for (DeferredDelete row : rows) {
-                try {
-                    List<PreservedRef> active = refDao.getActivePinsForPath(row.absolutePath);
-                    if (active != null && !active.isEmpty()) {
-                        continue; // another active pin covers the path; released when it terminates
-                    }
-                    File file = new File(row.absolutePath);
-                    AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
-                            file.exists(), file.exists() ? file.length() : 0,
-                            file.exists() ? file.lastModified() : 0,
-                            row.sizeAtPin, row.mtimeAtPin);
-                    if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
-                        if (row.cancelDeferred) {
-                            cancelLoadFileByName(account, file.getName());
-                        }
-                        ArrayList<File> toDelete = new ArrayList<>();
-                        toDelete.add(file);
-                        // The guarded public entry: no active pin remains, so it deletes.
-                        FileLoader.getInstance(account).deleteFiles(toDelete, 0);
-                    }
-                    dao.setState(row.id, "DONE");
-                } catch (Throwable e) {
-                    FileLog.e(TAG + ": deferred release row failed", e);
+            File file = new File(row.absolutePath);
+            AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
+                    file.exists(), file.exists() ? file.length() : 0,
+                    file.exists() ? file.lastModified() : 0,
+                    row.sizeAtPin, row.mtimeAtPin);
+            if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
+                if (row.cancelDeferred) {
+                    cancelLoadFileByName(account, file.getName());
                 }
+                ArrayList<File> toDelete = new ArrayList<>();
+                toDelete.add(file);
+                // The guarded public entry: no active pin remains, so it deletes.
+                FileLoader.getInstance(account).deleteFiles(toDelete, 0);
             }
+            dao.setState(row.id, "DONE");
         } catch (Throwable e) {
-            FileLog.e(TAG + ": releaseDeferredDeletesForRef failed", e);
+            FileLog.e(TAG + ": deferred release row failed", e);
         }
     }
 
@@ -2130,11 +2173,19 @@ public final class AliGramPreservation {
                     long userId = ownUserId(account);
                     // Every ref of the dialog (all roles): the dialog's
                     // messages are gone, so no ref stays anchored.
+                    // Phase 3.1: dropping a ref ends its pin, so each
+                    // dropped ref's deferred rows are released right here
+                    // (per-ref, exact dialog — never account-wide). The
+                    // release re-checks active pins per path, so a file
+                    // another dialog still pins survives. Rows with
+                    // refId == 0 are unattributed and are released only
+                    // by the startup sweep, never here.
                     for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
                         if (AliGramEligibility.isActivePinState(ref.state)) {
                             cancelLoadFileForJob(ref);
                         }
                         dropRefAndDecrement(ref);
+                        releaseDeferredDeletesForRef(account, ref.refId);
                     }
                     sweepRefcountZeroBlobs(account);
                 } catch (Throwable e) {
@@ -2169,6 +2220,10 @@ public final class AliGramPreservation {
                             cancelLoadFileForJob(ref);
                         }
                         dropRefAndDecrement(ref);
+                        // Phase 3.1: per-ref release (see onDialogDeleted).
+                        // Kept messages' refs are not dropped, so their
+                        // deferred rows are never released here.
+                        releaseDeferredDeletesForRef(account, ref.refId);
                     }
                     sweepRefcountZeroBlobs(account);
                 } catch (Throwable e) {
@@ -2203,6 +2258,10 @@ public final class AliGramPreservation {
                             cancelLoadFileForJob(ref);
                         }
                         dropRefAndDecrement(ref);
+                        // Phase 3.1: per-ref release (see onDialogDeleted).
+                        // Refs above maxMessageId keep their pins, so their
+                        // deferred rows are never released here.
+                        releaseDeferredDeletesForRef(account, ref.refId);
                     }
                     sweepRefcountZeroBlobs(account);
                 } catch (Throwable e) {
@@ -2333,24 +2392,15 @@ public final class AliGramPreservation {
         // 5. Sweep unanchored refs + refcount-0 blobs; release orphaned deferred deletes.
         try {
             sweepRefcountZeroBlobs(account);
-            for (DeferredDelete row : deferredDao.getAllPending()) {
-                if (row.accountId != account) {
-                    continue;
-                }
-                List<PreservedRef> active = dao.getActivePinsForPath(row.absolutePath);
-                if (active == null || active.isEmpty()) {
-                    File file = new File(row.absolutePath);
-                    AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
-                            file.exists(), file.exists() ? file.length() : 0,
-                            file.exists() ? file.lastModified() : 0,
-                            row.sizeAtPin, row.mtimeAtPin);
-                    if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
-                        ArrayList<File> toDelete = new ArrayList<>();
-                        toDelete.add(file);
-                        FileLoader.getInstance(account).deleteFiles(toDelete, 0);
-                    }
-                    deferredDao.setState(row.id, "DONE");
-                }
+            // Account-scoped (Phase 3.1): never iterate all accounts' rows
+            // here. releaseDeferredRow re-checks active pins per path, so
+            // a file another dialog/account still pins is never deleted.
+            // (One deliberate unification: rows with cancelDeferred=true
+            // now also cancel the load, as the per-ref release does. At
+            // startup no load is in flight in this process, so the cancel
+            // is a no-op.)
+            for (DeferredDelete row : deferredDao.getPendingForAccount(account)) {
+                releaseDeferredRow(account, row);
             }
             long cutoff = System.currentTimeMillis() - 3600_000L;
             capturedDeletes.entrySet().removeIf(entry -> entry.getValue() < cutoff);
@@ -2543,6 +2593,9 @@ public final class AliGramPreservation {
                             dao.deleteRefsForAccount(userId);
                         }
                         if (deferredDao != null) {
+                            // Account-wide ON PURPOSE here (settings clear-all):
+                            // this operation means "this account, everything".
+                            // Never use deleteForAccount from a dialog flow.
                             deferredDao.deleteForAccount(account);
                         }
                         sweepUnreferencedBlobs();
@@ -2656,16 +2709,22 @@ public final class AliGramPreservation {
             copyQueue.postRunnable(() -> {
                 try {
                     PreservedRefDao dao = AliGramData.refDao();
-                    DeferredDeleteDao deferredDao = AliGramData.deferredDao();
                     if (dao == null) {
                         return;
                     }
                     long userId = ownUserId(account);
+                    // Phase 3.1 (critical fix): the old code called
+                    // deferredDao.deleteForAccount(account) here, deleting
+                    // the WHOLE account's deferred rows for a per-chat
+                    // clear. The fix releases exactly this dialog's rows,
+                    // per dropped ref — the release re-checks active pins
+                    // per path, so a file another dialog still pins
+                    // survives, and rows of other dialogs/accounts are
+                    // never touched. Unattributed (refId == 0) rows are
+                    // left for the startup sweep.
                     for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
                         dropRefAndDecrement(ref);
-                    }
-                    if (deferredDao != null) {
-                        deferredDao.deleteForAccount(account);
+                        releaseDeferredDeletesForRef(account, ref.refId);
                     }
                     sweepRefcountZeroBlobs(account);
                 } catch (Throwable e) {
@@ -2696,6 +2755,9 @@ public final class AliGramPreservation {
                             dao.deleteRefsForAccount(userId);
                         }
                         if (deferredDao != null) {
+                            // Account-wide ON PURPOSE here (account removal):
+                            // this operation means "this account, everything".
+                            // Never use deleteForAccount from a dialog flow.
                             deferredDao.deleteForAccount(account);
                         }
                         sweepUnreferencedBlobs();

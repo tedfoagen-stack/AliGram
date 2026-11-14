@@ -54,20 +54,14 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>Determinism: fixed ids, fixed timestamps ({@code T0}), no wall-clock
  * or random dependence. A fresh in-memory DB is built per test.
  *
- * <p>Assumed DAO methods (do NOT exist yet — see the scenario-8 test and
- * the report): {@code DeferredDeleteDao.deleteByAccountAndDialog(int,
- * long)} and, equivalently, {@code deleteForRef(long)}. {@link DeferredDelete}
- * carries no {@code dialogId} column, so a correct dialog-scoped delete
- * must resolve the dialog via {@code refId -> PreservedRef.dialogId}
- * (e.g. {@code DELETE ... WHERE accountId = :accountId AND refId IN
- * (SELECT refId FROM PreservedRef WHERE accountId = :accountId AND
- * dialogId = :dialogId)}). Until the sibling fix lands, the dialog-isolation
- * tests below exercise the CORRECT scoping with the primitives that DO
- * exist ({@code getPendingForRef} + {@code setState} + {@code deleteDone}),
- * and deliberately do NOT call the current account-wide
- * {@code deleteForAccount} for a dialog-scoped cleanup. If the assumed
- * method lands, the scenario-8 test should be switched to call it
- * directly (the assertions stay the same).
+ * <p>Dialog-scoped deferred cleanup uses the real DAO primitive
+ * {@code DeferredDeleteDao.deleteByAccountAndDialog(int, long)} (Phase
+ * 3.1 fix): it resolves the dialog through
+ * {@code refId -> PreservedRef.dialogId} because {@link DeferredDelete}
+ * carries no {@code dialogId} column, so rows with {@code refId == 0}
+ * are never matched and rows of other dialogs/accounts survive. See the
+ * scenario-8 test, which calls it directly. The per-ref equivalent
+ * {@code deleteForRef(long)} also exists.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 36) // app targetSdk; within Robolectric 4.17's supported 23..37 range
@@ -701,15 +695,12 @@ public class AliGramRoomIntegrationTest {
     // ------------------------------------------------------------------
     // Scenario 8 — multiple dialogs remain isolated.
     //
-    // ASSUMED (not yet existing) DAO method:
-    //   DeferredDeleteDao.deleteByAccountAndDialog(int accountId, long dialogId)
-    // DeferredDelete has no dialogId column, so that method must resolve
-    // the dialog through refId -> PreservedRef.dialogId. Until it lands,
-    // this test performs the dialog-scoped deferred cleanup with the
-    // primitives that DO exist (getPendingForRef + setState + deleteDone)
-    // and asserts the same isolation. It deliberately does NOT call the
-    // current account-wide deleteForAccount() for a dialog cleanup — that
-    // call is the Phase 3.1 critical bug (clearPreservedForDialog /
+    // Dialog-scoped deferred cleanup uses the real DAO primitive
+    // DeferredDeleteDao.deleteByAccountAndDialog(int, long) (Phase 3.1
+    // fix): it resolves the dialog through refId -> PreservedRef.dialogId,
+    // because DeferredDelete has no dialogId column. It deliberately does
+    // NOT call the account-wide deleteForAccount() for a dialog cleanup —
+    // that call was the Phase 3.1 critical bug (clearPreservedForDialog /
     // onDialogDeleted delete deferred rows account-wide).
     // ------------------------------------------------------------------
 
@@ -730,20 +721,18 @@ public class AliGramRoomIntegrationTest {
         assertEquals(1, (int) onDb(() -> db.preservedRefDao().getRefsForDialog(USER_0, DIALOG_A)).size());
         assertEquals(1, (int) onDb(() -> db.preservedRefDao().getRefsForDialog(USER_0, DIALOG_B)).size());
 
-        // Dialog-scoped cleanup of dialog A only: drop its refs (with
-        // refcount decrement) and resolve its deferred rows to DONE, then
-        // sweep the blobs that reached refcount 0 (as production
-        // clearPreservedForDialog does after dropping the refs).
-        // TODO(sibling-fix): replace the deferred loop with
-        //   deferredDao.deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A)
-        // once that method exists; the assertions below stay unchanged.
+        // Dialog-scoped cleanup of dialog A only: delete its deferred rows
+        // with the dialog-scoped DAO primitive, drop its refs (with
+        // refcount decrement), then sweep the blobs that reached refcount 0
+        // (as production clearPreservedForDialog does after dropping the
+        // refs). The assertions below are unchanged from the pre-fix
+        // version, which modelled the same scoping with getPendingForRef +
+        // setState + deleteDone.
         onDbVoid(() -> {
             PreservedRefDao refDao = db.preservedRefDao();
             DeferredDeleteDao deferredDao = db.deferredDeleteDao();
+            deferredDao.deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A);
             for (PreservedRef ref : refDao.getRefsForDialog(USER_0, DIALOG_A)) {
-                for (DeferredDelete row : deferredDao.getPendingForRef(ref.refId)) {
-                    deferredDao.setState(row.id, "DONE");
-                }
                 dropRefAndDecrement(ref);
             }
             deferredDao.deleteDone();
