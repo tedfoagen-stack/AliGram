@@ -256,8 +256,15 @@ public class AliGramRoomIntegrationTest {
         }
     }
 
-    private int refCountOf(String blobId) {
-        PreservedBlob blob = db.preservedBlobDao().getById(blobId);
+    // NOTE: this helper MUST run its query on the worker thread via onDb —
+    // the @Test methods run on the Robolectric main-looper thread and Room
+    // refuses DAO calls there ("Cannot access database on the main
+    // thread"). Calling getById() directly here failed all eight
+    // scenarios that assert refcounts (run 43630560041:
+    // IllegalStateException at line 260). It is never called from inside
+    // another onDb() body, so no deadlock on the single-thread executor.
+    private int refCountOf(String blobId) throws Exception {
+        PreservedBlob blob = onDb(() -> db.preservedBlobDao().getById(blobId));
         return blob == null ? -1 : blob.refCount;
     }
 
