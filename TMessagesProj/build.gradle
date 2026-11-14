@@ -184,6 +184,30 @@ android {
 
     sourceSets.main.jniLibs.srcDirs = ['./jni/']
 
+    // AliGram: Robolectric unit tests on JDK 17+ (CI uses Temurin 21) need
+    // --add-opens so the sandbox can touch internal OpenJDK APIs. Without
+    // these, every Robolectric test fails in FileDescriptorInterceptor.setInt
+    // (jdk.internal.access.SharedSecrets) with IllegalAccessException
+    // (run 43629996060: 22/22 Robolectric tests failed, 0 production-code
+    // failures — compilation and all 42 pure-JVM tests were green).
+    // List is verbatim from the official Robolectric getting-started guide
+    // (robolectric.org/getting-started, "Running with Java 17 and higher").
+    testOptions {
+        unitTests.all {
+            jvmArgs += [
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "--add-opens=java.base/java.util=ALL-UNNAMED",
+                "--add-opens=java.base/java.io=ALL-UNNAMED",
+                "--add-opens=java.base/java.net=ALL-UNNAMED",
+                "--add-opens=java.base/java.security=ALL-UNNAMED",
+                "--add-opens=java.base/java.text=ALL-UNNAMED",
+                "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+            ]
+        }
+    }
+
     namespace = 'org.telegram.messenger'
 }
 
