@@ -1307,14 +1307,16 @@ public class AliGramRoomIntegrationTest {
     // UPDATE trigger that aborts ANY COPYING update, plus a probe of
     // inTransaction() inside the transaction. Outcomes distinguish:
     //   - trigger fires + inTx true + row ENQUEUED
-    //       => transactions hold for trigger aborts; scenario 12's
-    //       failure is specific to its two-row WHEN-subquery setup.
+    //       => only proves the trigger fires and a transaction began.
+    //       NOTE (corrected after run 43635364461): the rollback
+    //       assertion here is VACUOUS — the single update always
+    //       aborts, so the row is ENQUEUED with or without a
+    //       transaction. This probe cannot prove rollback; scenario
+    //       12d (two updates, first succeeds, second aborts) is the
+    //       real rollback probe.
     //   - trigger fires + inTx true + row COPYING
-    //       => the trigger abort bypasses the transaction in this
-    //       Robolectric harness; scenario 12's trigger injection is
-    //       invalid HERE and its rollback property must be proven by
-    //       another injection (5(b) + scenario 11 already cover the
-    //       mechanism and the concurrency invariant).
+    //       => cannot happen for the single update (it never commits);
+    //       listed only for completeness.
     //   - inTx false
     //       => beginTransaction was a no-op on this connection.
     // Steps: https://github.com/tedfoagen-stack/AliGram/actions/runs/43634264861
@@ -1371,6 +1373,122 @@ public class AliGramRoomIntegrationTest {
         assertEquals("probe row was NOT rolled back: the trigger abort bypassed the transaction in this harness",
                 AliGramEligibility.STATE_ENQUEUED,
                 onDb(() -> db.preservedRefDao().getRefById(id)).state);
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario 12c — diagnostic probe (Phase 3.2): does a transaction
+    // survive a nested read + a successful UPDATE + a Java exception?
+    //
+    // NO trigger at all. One row ENQUEUED. Inside db.runInTransaction:
+    // getRefById (a @Query -> the generated code runs it in its own
+    // nested runInTransaction), then updateRef to COPYING (succeeds),
+    // then a deliberate IllegalStateException (same pattern as 5(a)).
+    // If the row reverts to ENQUEUED, the transaction survives the
+    // nested read and the update — nested transactions work in this
+    // harness. If it stays COPYING, the nested read ended the outer
+    // transaction (which would also cast doubt on 5(b)'s reading).
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario12c_transactionSurvivesNestedReadAndUpdate() throws Exception {
+        final long id = onDb(() -> db.preservedRefDao().insertRef(
+                newRef(USER_0, ACCOUNT_0, DIALOG_A, 78, "LIVE", 0,
+                        AliGramEligibility.STATE_ENQUEUED, "probe12c.mp4")));
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        try {
+            onDb(() -> db.runInTransaction(() -> {
+                final PreservedRef row = db.preservedRefDao().getRefById(id);
+                row.state = AliGramEligibility.STATE_COPYING;
+                db.preservedRefDao().updateRef(row);
+                throw new IllegalStateException("simulated mid-transaction failure");
+            }));
+            fail("transaction body must propagate its failure");
+        } catch (ExecutionException e) {
+            thrown.set(e.getCause());
+        }
+        assertNotNull("transaction threw nothing", thrown.get());
+        assertTrue("wrong failure: " + thrown.get(),
+                thrown.get() instanceof IllegalStateException);
+        assertEquals("row was NOT rolled back: the nested read ended the outer transaction",
+                AliGramEligibility.STATE_ENQUEUED,
+                onDb(() -> db.preservedRefDao().getRefById(id)).state);
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario 12d — diagnostic probe (Phase 3.2): the same two-update
+    // trigger abort as scenario 12, but WITHOUT the claim's SELECT.
+    //
+    // Two rows ENQUEUED, fetched OUTSIDE the transaction. The same
+    // conditional trigger as scenario 12 (aborts the SECOND COPYING
+    // update: the WHEN subquery counts COPYING rows, 0 before the first
+    // update, 1 before the second). Inside db.runInTransaction:
+    // updateRef(w1 -> COPYING) then updateRef(w2 -> COPYING, aborts).
+    // Unlike 12b (one always-aborted update — vacuous for rollback),
+    // this is a REAL rollback test: the first update succeeds, so
+    // ENQUEUED afterwards proves the rollback happened.
+    //
+    // Outcomes:
+    //   - PASS => the trigger + two-update sequence rolls back fine
+    //     without the SELECT; scenario 12's SELECT (nested read
+    //     transaction) is the culprit.
+    //   - FAIL (first row COPYING) => the trigger-aborted second update
+    //     does not roll back in this harness even with no SELECT; the
+    //     trigger injection is invalid HERE for multi-update claims.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void scenario12d_twoUpdateTriggerAbortRollsBackWithoutSelect() throws Exception {
+        final long[] ids = seedClaimJobsStandalone("shared.mp4");
+        final long w1id = ids[0];
+        final long w2id = ids[1];
+        final String trigger = "aligram_claim_test_abort_12d";
+        onDb(() -> {
+            db.getOpenHelper().getWritableDatabase().execSQL(
+                    "CREATE TRIGGER " + trigger + " "
+                    + "BEFORE UPDATE OF state ON PreservedRef "
+                    + "WHEN NEW.state = 'COPYING' "
+                    + "AND (SELECT COUNT(*) FROM PreservedRef WHERE state = 'COPYING') >= 1 "
+                    + "BEGIN SELECT RAISE(ABORT, 'aligram-test-12d: abort second COPYING update'); END");
+            return null;
+        });
+        final PreservedRef w1 = onDb(() -> db.preservedRefDao().getRefById(w1id));
+        final PreservedRef w2 = onDb(() -> db.preservedRefDao().getRefById(w2id));
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        try {
+            onDb(() -> db.runInTransaction(() -> {
+                w1.state = AliGramEligibility.STATE_COPYING;
+                db.preservedRefDao().updateRef(w1);
+                w2.state = AliGramEligibility.STATE_COPYING;
+                db.preservedRefDao().updateRef(w2);
+                return null;
+            }));
+            fail("second update must throw when the trigger aborts it");
+        } catch (ExecutionException e) {
+            thrown.set(e.getCause());
+        }
+        try {
+            assertNotNull("claim threw nothing", thrown.get());
+            assertTrue("trigger did not fire: " + thrown.get(),
+                    thrown.get().getMessage() != null
+                            && thrown.get().getMessage().contains("aligram-test-12d"));
+            assertEquals("first row was NOT rolled back",
+                    AliGramEligibility.STATE_ENQUEUED,
+                    onDb(() -> db.preservedRefDao().getRefById(w1id)).state);
+            assertEquals("second row must stay DOWNLOADING (its update aborted)",
+                    AliGramEligibility.STATE_DOWNLOADING,
+                    onDb(() -> db.preservedRefDao().getRefById(w2id)).state);
+        } finally {
+            try {
+                onDb(() -> {
+                    db.getOpenHelper().getWritableDatabase()
+                            .execSQL("DROP TRIGGER IF EXISTS " + trigger);
+                    return null;
+                });
+            } catch (Exception ignored) {
+                // The DB is per-test in-memory; a leftover trigger dies with it.
+            }
+            cleanupClaimJobs(ids);
+        }
     }
 
     // ------------------------------------------------------------------
