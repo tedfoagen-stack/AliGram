@@ -1,5 +1,6 @@
 package com.radolyn.ayugram.aligram;
 
+import androidx.annotation.NonNull;
 import androidx.room.Entity;
 import androidx.room.Index;
 import androidx.room.PrimaryKey;
@@ -20,6 +21,7 @@ import androidx.room.PrimaryKey;
 public class PreservedBlob {
     /** "d<documentId>_<dcId>_<size>_<sha16>" or "p<photoId>_…" (see AliGramEligibility.blobIdFor). */
     @PrimaryKey
+    @NonNull
     public String blobId;
     /** 0 when photo. */
     public long documentId;
