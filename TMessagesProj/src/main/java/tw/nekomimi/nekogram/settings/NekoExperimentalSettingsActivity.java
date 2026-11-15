@@ -189,6 +189,55 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
             .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
             .makeRed(AlertDialog.BUTTON_POSITIVE)
             .show()));
+    // --- AliGram: adjustable preservation limits. Defaults reproduce
+    // today's caps (video 10 MiB mobile / 15 MiB Wi-Fi, documents 1 MiB /
+    // 3 MiB, 25 files / 500 MiB per chat); nothing changes until the user
+    // touches a row. The custom video value wins over the preset when
+    // valid (1..100); empty means unset.
+    private final AbstractConfigCell headerAliGramLimits = cellGroup.appendCell(new ConfigCellHeader("AliGram"));
+    private final AbstractConfigCell aliGramVideoCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramVideoCapMb(), new String[]{
+            "Default (10 MB mobile / 15 MB Wi-Fi)",
+            "10 MB",
+            "15 MB",
+            "25 MB",
+            "50 MB",
+            "75 MB",
+            "100 MB",
+    }, new int[]{0, 10, 15, 25, 50, 75, 100}, null));
+    private final AbstractConfigCell aliGramVideoCapCustomRow = cellGroup.appendCell(new ConfigCellTextInput(null, NaConfig.INSTANCE.getAliGramVideoCapCustomMb(), "1–100", null,
+            raw -> raw == null ? "" : raw.trim(),
+            (raw, checked) -> {
+                if (checked == null || checked.isEmpty()) {
+                    return false; // empty = unset
+                }
+                try {
+                    int v = Integer.parseInt(checked);
+                    return v < 1 || v > 100;
+                } catch (NumberFormatException e) {
+                    return true;
+                }
+            }));
+    private final AbstractConfigCell aliGramDocCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramDocCapMb(), new String[]{
+            "Default (1 MB mobile / 3 MB Wi-Fi)",
+            "1 MB",
+            "3 MB",
+            "5 MB",
+            "10 MB",
+            "25 MB",
+            "50 MB",
+    }, new int[]{0, 1, 3, 5, 10, 25, 50}, null));
+    private final AbstractConfigCell aliGramMaxFilesRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramMaxFilesPerChat(), new String[]{
+            "10",
+            "25",
+            "50",
+            "100",
+    }, new int[]{10, 25, 50, 100}, null));
+    private final AbstractConfigCell aliGramBudgetRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramBudgetMbPerChat(), new String[]{
+            "100 MB",
+            "250 MB",
+            "500 MB",
+            "1000 MB",
+    }, new int[]{100, 250, 500, 1000}, null));
     private final AbstractConfigCell dividerAyuMoments = cellGroup.appendCell(new ConfigCellDivider());
 
     // N-Config

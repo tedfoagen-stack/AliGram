@@ -522,4 +522,94 @@ public class AliGramEligibilityTest {
         }
         assertEquals(2, claimed);
     }
+
+    // ------------------------------------------------------------------
+    // Adjustable limits (2026-11-15): user settings, defaults reproduce
+    // today's caps exactly; nothing changes until the user touches a row.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void limitsDefaultsReproduceTodayCaps() {
+        AliGramEligibility.Limits d = AliGramEligibility.Limits.defaults();
+        assertEquals(10L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, d));
+        assertEquals(15L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.WIFI, d));
+        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, d));
+        assertEquals(3L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.WIFI, d));
+        // Voice floor still applies under defaults.
+        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VOICE, AliGramEligibility.NetworkPreset.MOBILE, d));
+        // Photos stay uncapped under limits.
+        assertEquals(-1L, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.PHOTO, AliGramEligibility.NetworkPreset.WIFI, d));
+        assertTrue(AliGramEligibility.withinBudget(24, 0, 1, d));
+        assertFalse(AliGramEligibility.withinBudget(25, 0, 1, d));
+        assertFalse(AliGramEligibility.withinBudget(0, 500L * 1024 * 1024, 1, d));
+    }
+
+    @Test
+    public void limitsVideoPresetAppliesToBothNetworks() {
+        AliGramEligibility.Limits l = new AliGramEligibility.Limits(50, 0, 0, 25, 500);
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, l));
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.WIFI, l));
+        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 50L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, l));
+        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 50L * 1024 * 1024 + 1, AliGramEligibility.NetworkPreset.WIFI, l));
+        // Round video and GIF share the video cap.
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.GIF, AliGramEligibility.NetworkPreset.MOBILE, l));
+        // Document cap untouched by the video preset.
+        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, l));
+    }
+
+    @Test
+    public void limitsCustomVideoCapClamping() {
+        // 0 / negative = unset → legacy caps.
+        assertEquals(0, AliGramEligibility.clampCustomVideoCapMb(0));
+        assertEquals(0, AliGramEligibility.clampCustomVideoCapMb(-5));
+        assertEquals(0, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(0, 0, 0, 25, 500)));
+        // 1..100 accepted verbatim.
+        assertEquals(1, AliGramEligibility.clampCustomVideoCapMb(1));
+        assertEquals(50, AliGramEligibility.clampCustomVideoCapMb(50));
+        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(100));
+        // Above the ceiling clamps to 100, never beyond.
+        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(101));
+        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(1000));
+        assertEquals(100, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(0, 101, 0, 25, 500)));
+        // Custom wins over the preset when valid.
+        assertEquals(75, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(50, 75, 0, 25, 500)));
+        assertEquals(75L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(50, 75, 0, 25, 500)));
+        // A 60 MiB video passes at custom 100, fails at custom 50.
+        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 60L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(0, 100, 0, 25, 500)));
+        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 60L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(0, 50, 0, 25, 500)));
+    }
+
+    @Test
+    public void limitsDocPresetAppliesToBothNetworks() {
+        AliGramEligibility.Limits l = new AliGramEligibility.Limits(0, 0, 50, 25, 500);
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, l));
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.WIFI, l));
+        // Voice floor: max(512 KiB, doc cap) → 50 MiB here.
+        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VOICE, AliGramEligibility.NetworkPreset.WIFI, l));
+        // A 10 MiB document passes at doc cap 50, fails at the legacy 3 MiB Wi-Fi cap.
+        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.DOCUMENT, 10L * 1024 * 1024, AliGramEligibility.NetworkPreset.WIFI, l));
+        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.DOCUMENT, 10L * 1024 * 1024, AliGramEligibility.NetworkPreset.WIFI, AliGramEligibility.Limits.defaults()));
+        // Unknown size still fails closed except photos, under limits too.
+        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, -1, AliGramEligibility.NetworkPreset.WIFI, l));
+        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.PHOTO, -1, AliGramEligibility.NetworkPreset.WIFI, l));
+    }
+
+    @Test
+    public void limitsBudgetsAreAdjustable() {
+        AliGramEligibility.Limits l = new AliGramEligibility.Limits(0, 0, 0, 100, 1000);
+        assertTrue(AliGramEligibility.withinBudget(99, 0, 1, l));
+        assertFalse(AliGramEligibility.withinBudget(100, 0, 1, l));
+        long mib1000 = 1000L * 1024 * 1024;
+        assertTrue(AliGramEligibility.withinBudget(0, mib1000 - 1, 1, l));
+        assertFalse(AliGramEligibility.withinBudget(0, mib1000, 1, l));
+        // Narrow limits bite: 10 files / 100 MiB.
+        AliGramEligibility.Limits narrow = new AliGramEligibility.Limits(0, 0, 0, 10, 100);
+        assertFalse(AliGramEligibility.withinBudget(10, 0, 1, narrow));
+        assertFalse(AliGramEligibility.withinBudget(0, 100L * 1024 * 1024, 1, narrow));
+        assertTrue(AliGramEligibility.withinBudget(0, 100L * 1024 * 1024 - 1, 1, narrow));
+        // Non-positive stored values fall back to today's defaults.
+        AliGramEligibility.Limits broken = new AliGramEligibility.Limits(0, 0, 0, 0, 0);
+        assertFalse(AliGramEligibility.withinBudget(25, 0, 1, broken));
+        assertFalse(AliGramEligibility.withinBudget(0, 500L * 1024 * 1024, 1, broken));
+    }
 }

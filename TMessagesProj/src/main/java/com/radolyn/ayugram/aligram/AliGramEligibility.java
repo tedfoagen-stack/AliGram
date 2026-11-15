@@ -241,6 +241,155 @@ public final class AliGramEligibility {
     }
 
     // ------------------------------------------------------------------
+    // Adjustable limits (2026-11-15): user settings from the AliGram
+    // section of the Experimental settings screen. The legacy constants
+    // above stay the defaults; a setting of 0 means "untouched" and
+    // reproduces today's per-network caps exactly. All resolution here
+    // is pure (no Android / SharedPreferences) — the settings are read
+    // in AliGramPreservation.limits() and passed in as a Limits value.
+    // ------------------------------------------------------------------
+
+    /** Hard ceiling for a user-chosen video cap, in MB. */
+    public static final int VIDEO_CAP_CUSTOM_MAX_MB = 100;
+    /** Minimum for a user-chosen video cap, in MB. */
+    public static final int VIDEO_CAP_CUSTOM_MIN_MB = 1;
+    /** Hard ceiling for a user-chosen document cap, in MB (selector max). */
+    public static final int DOCUMENT_CAP_MAX_MB = 50;
+
+    /**
+     * Effective preservation limits resolved from user settings.
+     *
+     * <ul>
+     *   <li>{@code videoCapMb}: preset video cap in MB, applied to BOTH
+     *       networks; 0 = untouched (legacy 10 MiB mobile / 15 MiB Wi-Fi).</li>
+     *   <li>{@code videoCapCustomMb}: free-form video cap in MB; 0 = unset.
+     *       Only 1..100 is honored; anything else is ignored (a valid
+     *       custom value wins over the preset).</li>
+     *   <li>{@code docCapMb}: preset document cap in MB, both networks;
+     *       0 = untouched (legacy 1 MiB mobile / 3 MiB Wi-Fi).</li>
+     *   <li>{@code maxPendingJobs}: max pending jobs per chat (default 25).</li>
+     *   <li>{@code maxPendingBytesMb}: max pending bytes per chat, in MB
+     *       (default 500).</li>
+     * </ul>
+     */
+    public static final class Limits {
+        public final int videoCapMb;
+        public final int videoCapCustomMb;
+        public final int docCapMb;
+        public final int maxPendingJobs;
+        public final int maxPendingBytesMb;
+
+        public Limits(int videoCapMb, int videoCapCustomMb, int docCapMb,
+                      int maxPendingJobs, int maxPendingBytesMb) {
+            this.videoCapMb = videoCapMb;
+            this.videoCapCustomMb = videoCapCustomMb;
+            this.docCapMb = docCapMb;
+            this.maxPendingJobs = maxPendingJobs;
+            this.maxPendingBytesMb = maxPendingBytesMb;
+        }
+
+        /** Defaults reproduce today's behavior exactly. */
+        public static Limits defaults() {
+            return new Limits(0, 0, 0, MAX_PENDING_JOBS_PER_CHAT,
+                    (int) (MAX_PENDING_BYTES_PER_CHAT / (1024L * 1024L)));
+        }
+    }
+
+    /** Custom video cap clamp: 0/negative = unset; otherwise 1..100. */
+    public static int clampCustomVideoCapMb(int rawMb) {
+        if (rawMb < VIDEO_CAP_CUSTOM_MIN_MB) {
+            return 0;
+        }
+        return Math.min(rawMb, VIDEO_CAP_CUSTOM_MAX_MB);
+    }
+
+    /**
+     * Effective video cap in MB: custom (1..100) wins, then preset
+     * (clamped to 1..100), else 0 = legacy per-network caps.
+     */
+    public static int resolveVideoCapMb(Limits limits) {
+        int custom = clampCustomVideoCapMb(limits.videoCapCustomMb);
+        if (custom > 0) {
+            return custom;
+        }
+        if (limits.videoCapMb > 0) {
+            return Math.min(Math.max(limits.videoCapMb, VIDEO_CAP_CUSTOM_MIN_MB), VIDEO_CAP_CUSTOM_MAX_MB);
+        }
+        return 0;
+    }
+
+    /** Effective document cap in MB: preset clamped to 1..50, else 0 = legacy. */
+    public static int resolveDocCapMb(Limits limits) {
+        if (limits.docCapMb <= 0) {
+            return 0;
+        }
+        return Math.min(Math.max(limits.docCapMb, 1), DOCUMENT_CAP_MAX_MB);
+    }
+
+    /** Effective video cap in bytes for a network preset under these limits. */
+    public static long videoCapBytes(NetworkPreset preset, Limits limits) {
+        int mb = resolveVideoCapMb(limits);
+        if (mb == 0) {
+            return preset == NetworkPreset.WIFI ? VIDEO_CAP_WIFI : VIDEO_CAP_MOBILE;
+        }
+        return (long) mb * 1024L * 1024L;
+    }
+
+    /** Effective document cap in bytes for a network preset under these limits. */
+    public static long docCapBytes(NetworkPreset preset, Limits limits) {
+        int mb = resolveDocCapMb(limits);
+        if (mb == 0) {
+            return preset == NetworkPreset.WIFI ? DOCUMENT_CAP_WIFI : DOCUMENT_CAP_MOBILE;
+        }
+        return (long) mb * 1024L * 1024L;
+    }
+
+    /** Size cap in bytes for a class under a network preset and user limits. -1 = no size check (photo). */
+    public static long sizeCapBytes(MediaClass mediaClass, NetworkPreset preset, Limits limits) {
+        switch (mediaClass) {
+            case PHOTO:
+                return -1;
+            case VIDEO:
+            case ROUND_VIDEO:
+            case GIF:
+                return videoCapBytes(preset, limits);
+            case VOICE: {
+                long docCap = docCapBytes(preset, limits);
+                return Math.max(VOICE_FLOOR, docCap);
+            }
+            case DOCUMENT:
+            case MUSIC:
+                return docCapBytes(preset, limits);
+            default:
+                return 0;
+        }
+    }
+
+    /** {@code size} within cap under user limits; {@code size < 0} (unknown) fails closed except photos. */
+    public static boolean isWithinSizeCap(MediaClass mediaClass, long size, NetworkPreset preset, Limits limits) {
+        long cap = sizeCapBytes(mediaClass, preset, limits);
+        if (cap < 0) {
+            return true; // photo: no size check
+        }
+        if (cap == 0) {
+            return false;
+        }
+        return size >= 0 && size <= cap;
+    }
+
+    /** Per-chat budget under user limits: max pending jobs / max pending bytes. */
+    public static boolean withinBudget(int pendingJobs, long pendingBytes, long newSize, Limits limits) {
+        int maxJobs = limits.maxPendingJobs > 0 ? limits.maxPendingJobs : MAX_PENDING_JOBS_PER_CHAT;
+        long maxBytes = limits.maxPendingBytesMb > 0
+                ? (long) limits.maxPendingBytesMb * 1024L * 1024L
+                : MAX_PENDING_BYTES_PER_CHAT;
+        if (pendingJobs >= maxJobs) {
+            return false;
+        }
+        return pendingBytes + Math.max(0, newSize) <= maxBytes;
+    }
+
+    // ------------------------------------------------------------------
     // Ingest / freeze / binding predicates (Phase 2.3 §4.3).
     // ------------------------------------------------------------------
 

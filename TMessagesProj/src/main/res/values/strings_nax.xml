@@ -307,6 +307,11 @@
     <string name="AliGramAboutText">AliGram is a modified Telegram client based on NagramX.\n\nMedia preservation: in selected groups and channels, new media is downloaded when it arrives and kept in private storage, so it survives deletion or edits.\n\nAliGram is free software licensed under the GNU General Public License v3. Upstream source and attribution are preserved in the project repository.</string>
     <string name="AliGramClearPreservedConfirm">Delete all media preserved by AliGram? Per-chat preservation stays enabled and will keep preserving new media.</string>
     <string name="AliGramPreservedStorageAbout">Media from selected groups and channels is downloaded when received and kept in private storage, so it survives deletion or edits.</string>
+    <string name="AliGramVideoCapMB">Video size limit</string>
+    <string name="AliGramVideoCapCustomMB">Custom video size limit (MB)</string>
+    <string name="AliGramDocCapMB">Document size limit</string>
+    <string name="AliGramMaxFilesPerChat">Max preserved files per chat</string>
+    <string name="AliGramBudgetMBPerChat">Preserved storage budget per chat</string>
     <string name="PasskeyLogin">Passkey Login</string>
     <string name="PasskeyInfo2">This feature only works with password managers that allow the user to manage trust settings for privileged apps, such as **Bitwarden** and **KeePassDX**.</string>
     <string name="PasskeyUnsupportedTitle">Unsupported password manager</string>

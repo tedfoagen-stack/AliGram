@@ -421,6 +421,38 @@ public final class AliGramPreservation {
         return AliGramEligibility.NetworkPreset.MOBILE;
     }
 
+    /**
+     * Effective preservation limits from the global AliGram settings
+     * (NaConfig; Experimental settings → AliGram section). Never throws:
+     * an unreadable or malformed value falls back to today's defaults
+     * (see {@link AliGramEligibility.Limits#defaults()}). The custom video
+     * cap is a free-form string; only 1..100 is honored.
+     */
+    public static AliGramEligibility.Limits limits() {
+        int videoCapMb = 0;
+        int videoCapCustomMb = 0;
+        int docCapMb = 0;
+        int maxJobs = 0;
+        int budgetMb = 0;
+        try {
+            videoCapMb = NaConfig.INSTANCE.getAliGramVideoCapMb().Int();
+            docCapMb = NaConfig.INSTANCE.getAliGramDocCapMb().Int();
+            maxJobs = NaConfig.INSTANCE.getAliGramMaxFilesPerChat().Int();
+            budgetMb = NaConfig.INSTANCE.getAliGramBudgetMbPerChat().Int();
+            String custom = NaConfig.INSTANCE.getAliGramVideoCapCustomMb().String();
+            if (custom != null) {
+                try {
+                    videoCapCustomMb = Integer.parseInt(custom.trim());
+                } catch (NumberFormatException ignored) {
+                    videoCapCustomMb = 0;
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+        return new AliGramEligibility.Limits(videoCapMb, videoCapCustomMb, docCapMb, maxJobs, budgetMb);
+    }
+
     public static long ownUserId(int account) {
         try {
             return UserConfig.getInstance(account).getClientUserId();
@@ -705,7 +737,7 @@ public final class AliGramPreservation {
             boolean mt = saveMediaEnabledForDialog(account, dialogId);
             boolean mediaOk = AliGramEligibility.isPreservableClass(ident.mediaClass);
             boolean sizeOk = ident.expectedFileName != null
-                    && AliGramEligibility.isWithinSizeCap(ident.mediaClass, ident.expectedSize, currentPreset(account));
+                    && AliGramEligibility.isWithinSizeCap(ident.mediaClass, ident.expectedSize, currentPreset(account), limits());
             boolean roaming = isRoaming(account);
             PreservedRefDao dao = AliGramData.refDao();
             if (dao == null) {
@@ -715,7 +747,7 @@ public final class AliGramPreservation {
             boolean withinBudget = AliGramEligibility.withinBudget(
                     dao.getPendingJobCountForDialog(userId, dialogId),
                     dao.getPendingBytesForDialog(userId, dialogId),
-                    ident.expectedSize);
+                    ident.expectedSize, limits());
             boolean eligible = AliGramEligibility.canIngest(true, dOn, eOn, mt, ident.isSecretTtlOnce,
                     mediaOk, sizeOk, isArchived, isChannelPostOk, roaming, withinBudget,
                     message.date, act.time, act.state, preExisting != null && preExisting);
@@ -2026,7 +2058,7 @@ public final class AliGramPreservation {
             boolean mediaOk = AliGramEligibility.isPreservableClass(newIdent.mediaClass);
             boolean sizeOk = newIdent.expectedFileName != null
                     && AliGramEligibility.isWithinSizeCap(newIdent.mediaClass, newIdent.expectedSize,
-                    currentPreset(account));
+                    currentPreset(account), limits());
             if (!AliGramEligibility.canEnrolNewMediaAtEdit(true, dOn, eOn, mt, newIdent.isSecretTtlOnce,
                     mediaOk, sizeOk, newMessage.edit_date, act.time, act.state, false, false)) {
                 return;
