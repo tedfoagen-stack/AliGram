@@ -139,6 +139,7 @@ import com.google.zxing.common.detector.MathUtils;
 import com.radolyn.ayugram.AyuConstants;
 import com.radolyn.ayugram.AyuUtils;
 import com.radolyn.ayugram.aligram.AliGramEligibility;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
@@ -3114,6 +3115,18 @@ public class ChatActivity extends BaseFragment implements
 
         dialog_id_Long = dialog_id;
 
+        // --- AliGram hidden folders: refuse to open a hidden dialog while
+        // locked. Returning false aborts the presentation (ActionBarLayout
+        // present/addFragmentToStack), exactly like the existing early
+        // returns above — and this sits before any observer is registered
+        // below, so nothing leaks. This is the single choke for every
+        // entry path (list tap, t.me link, notification, forwarded tap):
+        // didSelectResult and the LaunchActivity intent path both end up
+        // here. dialog_id == 0 (search/business-link modes) never matches.
+        if (dialog_id != 0 && AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            return false;
+        }
+
         transitionAnimationGlobalIndex = NotificationCenter.getGlobalInstance().setAnimationInProgress(transitionAnimationGlobalIndex, new int[0]);
 
         if (currentUser != null && Build.VERSION.SDK_INT < 23) {
@@ -3618,6 +3631,8 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        // --- AliGram hidden folders: cancel the auto-lock check.
+        aliGramCancelAutoLockCheck();
         if (messageMetricsView != null) {
             messageMetricsView.finish();
         }
@@ -31040,8 +31055,62 @@ public class ChatActivity extends BaseFragment implements
     Bulletin.Delegate bulletinDelegate;
 
     @Override
+    // --- AliGram hidden folders: auto-lock while inside a hidden chat. ---
+    private Runnable aliGramAutoLockCheckRunnable;
+
+    /**
+     * Schedules a check for when the 1-hour auto-lock expires while this
+     * chat is open. The core owns the lock; this only closes this chat if
+     * it became hidden (locked), via NotificationCenter.closeChats with
+     * this dialog id (which closes only this chat). Cancelled on
+     * pause/destroy; LaunchActivity.onResume covers the backgrounded case.
+     */
+    private void aliGramScheduleAutoLockCheck() {
+        aliGramCancelAutoLockCheck();
+        if (!AliGramHiddenFolders.isUnlocked(currentAccount) || AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+            return;
+        }
+        long remaining = AliGramHiddenFolders.getUnlockStartedAt(currentAccount) + AliGramHiddenFolders.AUTO_LOCK_MS - System.currentTimeMillis();
+        if (remaining <= 0) {
+            AliGramHiddenFolders.lock(currentAccount);
+            // Already expired: close shortly after onResume, not
+            // synchronously inside it (closeChats delivers immediately and
+            // would run finishFragment() mid-resume).
+            aliGramAutoLockCheckRunnable = () -> {
+                aliGramAutoLockCheckRunnable = null;
+                aliGramCloseIfHidden();
+            };
+            AndroidUtilities.runOnUIThread(aliGramAutoLockCheckRunnable, 100);
+            return;
+        }
+        aliGramAutoLockCheckRunnable = () -> {
+            aliGramAutoLockCheckRunnable = null;
+            if (!AliGramHiddenFolders.isUnlocked(currentAccount)) {
+                aliGramCloseIfHidden();
+            } else {
+                aliGramScheduleAutoLockCheck();
+            }
+        };
+        AndroidUtilities.runOnUIThread(aliGramAutoLockCheckRunnable, remaining);
+    }
+
+    private void aliGramCloseIfHidden() {
+        if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            getNotificationCenter().postNotificationName(NotificationCenter.closeChats, dialog_id);
+        }
+    }
+
+    private void aliGramCancelAutoLockCheck() {
+        if (aliGramAutoLockCheckRunnable != null) {
+            AndroidUtilities.cancelRunOnUIThread(aliGramAutoLockCheckRunnable);
+            aliGramAutoLockCheckRunnable = null;
+        }
+    }
+
     public void onResume() {
         super.onResume();
+        // --- AliGram hidden folders: (re)schedule the auto-lock check.
+        aliGramScheduleAutoLockCheck();
         cachedIsGestureNavigation = AndroidUtil.isGestureNavigation(getContext());
         checkShowBlur(false);
         activityResumeTime = System.currentTimeMillis();
@@ -31255,6 +31324,9 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onPause() {
         super.onPause();
+        // --- AliGram hidden folders: cancel the auto-lock check; it is
+        // re-scheduled on resume, and backgrounding locks via onStop.
+        aliGramCancelAutoLockCheck();
         scrolling = false;
         if (scrimPopupWindow != null) {
             scrimPopupWindow.setPauseNotifications(false);
@@ -46361,6 +46433,12 @@ public class ChatActivity extends BaseFragment implements
     // loaded on a background thread (Room queries), then the dialog is
     // shown on the UI thread.
     private void showAliGramPreservationDialog() {
+        // --- AliGram hidden folders: defense-in-depth — the per-chat
+        // preservation dialog must not open for a hidden dialog while
+        // locked (normally unreachable: the chat itself cannot be opened).
+        if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            return;
+        }
         if (getParentActivity() == null) {
             return;
         }
