@@ -76,7 +76,7 @@ public class AliGramActivationTest {
                              AliGramEligibility.ActivationState state, int activationTime) {
         return AliGramEligibility.canIngest(
                 true, true, true, true, false,
-                true, true, false, true, false,
+                true, true, true, false,
                 true, messageDate, activationTime, state, false);
     }
 
