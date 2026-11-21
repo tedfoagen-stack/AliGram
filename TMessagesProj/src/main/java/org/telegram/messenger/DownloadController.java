@@ -37,6 +37,8 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.radolyn.ayugram.aligram.AliGramPreservation;
+
 import tw.nekomimi.nekogram.filters.AyuFilter;
 import tw.nekomimi.nekogram.utils.AndroidUtil;
 
@@ -1138,11 +1140,27 @@ public class DownloadController extends BaseController implements NotificationCe
             }
             if (downloadObject.object instanceof TLRPC.Document) {
                 TLRPC.Document document = (TLRPC.Document) downloadObject.object;
+                // --- AliGram hook (Phase 3.1, D-02): the deferred-cancel
+                // rule — never cancel a pinned file's in-flight download.
+                // deleteFromDownloadQueue feeds this path after an edit,
+                // bypassing the isFileNamePinned guard that
+                // FileLoader.cancelLoadFiles has; the mirror lookup is
+                // UI-thread-safe (no DAO). The cancel intent is already
+                // recorded as a DeferredDelete row by Layer 1 and fires
+                // at release time instead.
+                if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(document))) {
+                    continue;
+                }
                 getFileLoader().cancelLoadFile(document, true);
             } else if (downloadObject.object instanceof TLRPC.Photo) {
                 TLRPC.Photo photo = (TLRPC.Photo) downloadObject.object;
                 TLRPC.PhotoSize photoSize = FileLoader.getClosestPhotoSizeWithSize(photo.sizes, AndroidUtilities.getPhotoSize());
                 if (photoSize != null) {
+                    // --- AliGram hook (Phase 3.1, D-02): same pin guard
+                    // as the Document branch above.
+                    if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(photoSize))) {
+                        continue;
+                    }
                     getFileLoader().cancelLoadFile(photoSize, true);
                 }
             }
@@ -1349,6 +1367,13 @@ public class DownloadController extends BaseController implements NotificationCe
             listenerInProgress = false;
             processLaterArrays();
             checkDownloadFinished(fileName, canceled);
+            // --- AliGram hook (H-C failure, Phase 2.2 §1.7): the
+            // preservation job retries on its attempts budget.
+            try {
+                AliGramPreservation.onFileLoadFailed(account, fileName, canceled == null ? 0 : canceled);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
         } else if (id == NotificationCenter.fileLoaded || id == NotificationCenter.httpFileDidLoad) {
             listenerInProgress = true;
             String fileName = (String) args[0];
@@ -1374,6 +1399,15 @@ public class DownloadController extends BaseController implements NotificationCe
             listenerInProgress = false;
             processLaterArrays();
             checkDownloadFinished(fileName, 0);
+            // --- AliGram hook (H-C completion, Phase 2.2 §1.7): fan-out
+            // claim for preservation jobs waiting on this file. Registered
+            // at construction — before any H-I loadFile can run (R-19).
+            try {
+                File loadedFile = args != null && args.length > 1 && args[1] instanceof File ? (File) args[1] : null;
+                AliGramPreservation.onFileLoaded(account, fileName, loadedFile);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
         } else if (id == NotificationCenter.fileLoadProgressChanged) {
             listenerInProgress = true;
             String fileName = (String) args[0];
@@ -1390,6 +1424,14 @@ public class DownloadController extends BaseController implements NotificationCe
             }
             listenerInProgress = false;
             processLaterArrays();
+            // --- AliGram hook (H-C progress): refreshes the watchdog's
+            // last-progress clock so an actively downloading job is never
+            // mistaken for stuck (R-19).
+            try {
+                AliGramPreservation.onFileLoadProgress(account, fileName);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
         } else if (id == NotificationCenter.fileUploadProgressChanged) {
             listenerInProgress = true;
             String fileName = (String) args[0];

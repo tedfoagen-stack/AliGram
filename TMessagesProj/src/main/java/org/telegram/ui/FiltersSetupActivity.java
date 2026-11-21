@@ -30,6 +30,8 @@ import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.Emoji;
 import org.telegram.messenger.FileLog;
@@ -585,6 +587,14 @@ public class FiltersSetupActivity extends BaseFragment implements NotificationCe
             items.add(ItemInner.asHeader(LocaleController.getString(R.string.Filters)));
             filtersStartPosition = items.size();
             for (int i = 0; i < dialogFilters.size(); ++i) {
+                // --- AliGram hidden folders: a hidden folder must not
+                // appear in the folder-edit list while locked. The item
+                // holds the filter object itself, so skipping here is safe
+                // for clicks; swapElements() below maps by filter identity
+                // (not position) for the same reason.
+                if (!AliGramHiddenFolders.isUnlocked(currentAccount) && AliGramHiddenFolders.isFilterHidden(currentAccount, dialogFilters.get(i).id)) {
+                    continue;
+                }
                 items.add(ItemInner.asFilter(dialogFilters.get(i)));
                 if (MessagesController.getInstance(currentAccount).folderTags && dialogFilters.get(i).color >= 0) {
                     loadedColors = true;
@@ -1124,13 +1134,23 @@ public class FiltersSetupActivity extends BaseFragment implements NotificationCe
             if (from == null || to == null || from.filter == null || to.filter == null) {
                 return;
             }
+            ArrayList<MessagesController.DialogFilter> filters = getMessagesController().dialogFilters;
+            // --- AliGram hidden folders: map by filter identity, not by
+            // items position — hidden filters are skipped from the items
+            // list while locked, so positions no longer line up with
+            // dialogFilters indices. Looked up before any mutation, so a
+            // miss changes nothing.
+            int fromIndex = filters.indexOf(from.filter);
+            int toIndex = filters.indexOf(to.filter);
+            if (fromIndex < 0 || toIndex < 0) {
+                return;
+            }
             int temp = from.filter.order;
             from.filter.order = to.filter.order;
             to.filter.order = temp;
-            ArrayList<MessagesController.DialogFilter> filters = getMessagesController().dialogFilters;
             try {
-                filters.set(fromPosition - filtersStartPosition, to.filter);
-                filters.set(toPosition - filtersStartPosition, from.filter);
+                filters.set(fromIndex, to.filter);
+                filters.set(toIndex, from.filter);
             } catch (Exception ignore) {}
             orderChanged = true;
             updateRows(true);

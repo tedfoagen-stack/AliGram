@@ -289,7 +289,10 @@ public class SearchAdapterHelper {
                 if (user == null) {
                     continue;
                 }
-                if (user.phone != null && user.phone.startsWith(phone)) {
+                // --- AliGram hidden folders: phone search is another
+                // server-merge surface; the per-adapter filter() override
+                // (DialogsSearchAdapter) drops hidden dialogs here.
+                if (user.phone != null && user.phone.startsWith(phone) && filter(user)) {
                     if (!hasFullMatch) {
                         hasFullMatch = user.phone.length() == phone.length();
                     }

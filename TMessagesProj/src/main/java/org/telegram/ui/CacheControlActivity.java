@@ -135,6 +135,8 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Objects;
 
+import com.radolyn.ayugram.aligram.AliGramPreservation;
+
 import tw.nekomimi.nekogram.helpers.LocalNameHelper;
 import tw.nekomimi.nekogram.helpers.remote.EmojiHelper;
 import xyz.nextalone.nagram.helper.BookmarksHelper;
@@ -969,7 +971,11 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
                     }
                     cleanDirJava(fileName + "/" + name, docType, p, onProgress);
                 } else {
-                    entry.delete();
+                    // --- AliGram hook (P-CLR): skip pinned preservation
+                    // sources on manual cache clear.
+                    if (!AliGramPreservation.isPathPinned(entry.getAbsolutePath())) {
+                        entry.delete();
+                    }
 
                     p[0]++;
                     if (onProgress != null) {
@@ -1629,6 +1635,11 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
         getFileLoader().cancelLoadAllFiles();
         getFileLoader().getFileLoaderQueue().postRunnable(() -> {
             for (int i = 0; i < fileInfos.size(); i++) {
+                // --- AliGram hook (P-CLR): skip pinned preservation sources
+                // on manual cache clear.
+                if (AliGramPreservation.isPathPinned(fileInfos.get(i).file.getAbsolutePath())) {
+                    continue;
+                }
                 fileInfos.get(i).file.delete();
             }
 

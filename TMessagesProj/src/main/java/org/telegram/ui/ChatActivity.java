@@ -138,6 +138,9 @@ import com.google.zxing.common.detector.MathUtils;
 
 import com.radolyn.ayugram.AyuConstants;
 import com.radolyn.ayugram.AyuUtils;
+import com.radolyn.ayugram.aligram.AliGramEligibility;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 import com.radolyn.ayugram.messages.AyuSavePreferences;
@@ -483,6 +486,7 @@ public class ChatActivity extends BaseFragment implements
     private final static int nkbtn_report = 2041;
     private final static int nkbtn_clearDeleted = 2100;
     private final static int nkbtn_viewDeleted = 2101;
+    private final static int nkbtn_aligram_preserve = 2102;
 
     public int shareAlertDebugMode = DEBUG_SHARE_ALERT_MODE_NORMAL;
     public boolean shareAlertDebugTopicsSlowMotion;
@@ -3111,6 +3115,18 @@ public class ChatActivity extends BaseFragment implements
 
         dialog_id_Long = dialog_id;
 
+        // --- AliGram hidden folders: refuse to open a hidden dialog while
+        // locked. Returning false aborts the presentation (ActionBarLayout
+        // present/addFragmentToStack), exactly like the existing early
+        // returns above — and this sits before any observer is registered
+        // below, so nothing leaks. This is the single choke for every
+        // entry path (list tap, t.me link, notification, forwarded tap):
+        // didSelectResult and the LaunchActivity intent path both end up
+        // here. dialog_id == 0 (search/business-link modes) never matches.
+        if (dialog_id != 0 && AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            return false;
+        }
+
         transitionAnimationGlobalIndex = NotificationCenter.getGlobalInstance().setAnimationInProgress(transitionAnimationGlobalIndex, new int[0]);
 
         if (currentUser != null && Build.VERSION.SDK_INT < 23) {
@@ -3615,6 +3631,8 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        // --- AliGram hidden folders: cancel the auto-lock check.
+        aliGramCancelAutoLockCheck();
         if (messageMetricsView != null) {
             messageMetricsView.finish();
         }
@@ -4918,6 +4936,8 @@ public class ChatActivity extends BaseFragment implements
             }
             hideTitleItem = NaConfig.INSTANCE.getChatMenuItemHideTitle().Bool() ? headerItem.lazilyAddSubItem(nkheaderbtn_hide_title, R.drawable.hide_title, getString(R.string.HideTitle)) : null;
             if (NaConfig.INSTANCE.getChatMenuItemViewDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_viewDeleted, R.drawable.msg_view_file, getString(R.string.ViewDeleted));
+            // --- AliGram: per-chat media preservation toggle (groups/channels only).
+            if (currentChat != null) headerItem.lazilyAddSubItem(nkbtn_aligram_preserve, R.drawable.msg_saved_solar, getString(R.string.AliGramPreserveMedia));
             if (NaConfig.INSTANCE.getChatMenuItemClearDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_clearDeleted, R.drawable.msg_clear, getString(R.string.ClearDeleted));
             if (!isTopic) {
                 if (NaConfig.INSTANCE.getChatMenuItemDeleteOwnMessages().Bool() && (ChatObject.isMegagroup(currentChat) || currentChat != null && !ChatObject.isChannel(currentChat))) {
@@ -31034,9 +31054,63 @@ public class ChatActivity extends BaseFragment implements
 
     Bulletin.Delegate bulletinDelegate;
 
+    // --- AliGram hidden folders: auto-lock while inside a hidden chat. ---
+    private Runnable aliGramAutoLockCheckRunnable;
+
+    /**
+     * Schedules a check for when the 1-hour auto-lock expires while this
+     * chat is open. The core owns the lock; this only closes this chat if
+     * it became hidden (locked), via NotificationCenter.closeChats with
+     * this dialog id (which closes only this chat). Cancelled on
+     * pause/destroy; LaunchActivity.onResume covers the backgrounded case.
+     */
+    private void aliGramScheduleAutoLockCheck() {
+        aliGramCancelAutoLockCheck();
+        if (!AliGramHiddenFolders.isUnlocked(currentAccount) || AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+            return;
+        }
+        long remaining = AliGramHiddenFolders.getUnlockStartedAt(currentAccount) + AliGramHiddenFolders.AUTO_LOCK_MS - System.currentTimeMillis();
+        if (remaining <= 0) {
+            AliGramHiddenFolders.lock(currentAccount);
+            // Already expired: close shortly after onResume, not
+            // synchronously inside it (closeChats delivers immediately and
+            // would run finishFragment() mid-resume).
+            aliGramAutoLockCheckRunnable = () -> {
+                aliGramAutoLockCheckRunnable = null;
+                aliGramCloseIfHidden();
+            };
+            AndroidUtilities.runOnUIThread(aliGramAutoLockCheckRunnable, 100);
+            return;
+        }
+        aliGramAutoLockCheckRunnable = () -> {
+            aliGramAutoLockCheckRunnable = null;
+            if (!AliGramHiddenFolders.isUnlocked(currentAccount)) {
+                aliGramCloseIfHidden();
+            } else {
+                aliGramScheduleAutoLockCheck();
+            }
+        };
+        AndroidUtilities.runOnUIThread(aliGramAutoLockCheckRunnable, remaining);
+    }
+
+    private void aliGramCloseIfHidden() {
+        if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            getNotificationCenter().postNotificationName(NotificationCenter.closeChats, dialog_id);
+        }
+    }
+
+    private void aliGramCancelAutoLockCheck() {
+        if (aliGramAutoLockCheckRunnable != null) {
+            AndroidUtilities.cancelRunOnUIThread(aliGramAutoLockCheckRunnable);
+            aliGramAutoLockCheckRunnable = null;
+        }
+    }
+
     @Override
     public void onResume() {
         super.onResume();
+        // --- AliGram hidden folders: (re)schedule the auto-lock check.
+        aliGramScheduleAutoLockCheck();
         cachedIsGestureNavigation = AndroidUtil.isGestureNavigation(getContext());
         checkShowBlur(false);
         activityResumeTime = System.currentTimeMillis();
@@ -31250,6 +31324,9 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onPause() {
         super.onPause();
+        // --- AliGram hidden folders: cancel the auto-lock check; it is
+        // re-scheduled on resume, and backgrounding locks via onStop.
+        aliGramCancelAutoLockCheck();
         scrolling = false;
         if (scrimPopupWindow != null) {
             scrimPopupWindow.setPauseNotifications(false);
@@ -46256,6 +46333,8 @@ public class ChatActivity extends BaseFragment implements
             }
         } else if (id == nkbtn_viewDeleted) {
             presentFragment(new AyuViewDeleted(dialog_id));
+        } else if (id == nkbtn_aligram_preserve) {
+            showAliGramPreservationDialog();
         } else if (id == nkbtn_bookmarks_manager) {
             presentFragment(new BookmarksActivity(dialog_id));
         } else if (id == nkheaderbtn_upgrade) {
@@ -46348,6 +46427,96 @@ public class ChatActivity extends BaseFragment implements
                 clearSelectionMode();
             });
         }
+    }
+
+    // --- AliGram: per-chat media preservation toggle dialog. Stats are
+    // loaded on a background thread (Room queries), then the dialog is
+    // shown on the UI thread.
+    private void showAliGramPreservationDialog() {
+        // --- AliGram hidden folders: defense-in-depth — the per-chat
+        // preservation dialog must not open for a hidden dialog while
+        // locked (normally unreachable: the chat itself cannot be opened).
+        if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialog_id)) {
+            return;
+        }
+        if (getParentActivity() == null) {
+            return;
+        }
+        final long did = dialog_id;
+        final int account = currentAccount;
+        Utilities.globalQueue.postRunnable(() -> {
+            final long[] stats = AliGramPreservation.getPreservedStatsForDialog(account, did);
+            AndroidUtilities.runOnUIThread(() -> showAliGramPreservationDialogInternal(did, stats));
+        });
+    }
+
+    private void showAliGramPreservationDialogInternal(long did, long[] stats) {
+        if (getParentActivity() == null) {
+            return;
+        }
+        final int account = currentAccount;
+        boolean enabled = AliGramPreservation.isOptedIn(account, did);
+        AliGramPreservation.Activation act = AliGramPreservation.getActivation(account, did);
+        // O-01 (Phase 3.2): exactly one body text. The ON text is shown
+        // only when STAMPED; while PENDING the pending notice stands alone
+        // (no "Preservation is ON…" above it), and the positive button
+        // reads "Cancel activation" — nothing is being preserved yet, so
+        // "Disable preservation" would misdescribe the action. The toggle
+        // itself is unchanged: it still just flips the opt-in flag.
+        AliGramEligibility.PreservationDialogState dialogState =
+                AliGramEligibility.resolvePreservationDialogState(enabled, act.state);
+        StringBuilder message = new StringBuilder();
+        switch (dialogState) {
+            case ENABLED:
+                message.append(getString(R.string.AliGramPreservationEnabled));
+                break;
+            case PENDING:
+                message.append(getString(R.string.AliGramPreservationPending));
+                break;
+            case DISABLED:
+            default:
+                message.append(getString(R.string.AliGramPreservationDisabled));
+                break;
+        }
+        if (stats != null && stats[0] > 0) {
+            message.append("\n\n").append(LocaleController.formatString(R.string.AliGramPreservationStats, stats[0], AndroidUtilities.formatFileSize(stats[2])));
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+        builder.setTitle(getString(R.string.AliGramPreservationTitle));
+        builder.setMessage(message.toString());
+        final int positiveRes;
+        switch (dialogState) {
+            case ENABLED:
+                positiveRes = R.string.AliGramPreservationDisable;
+                break;
+            case PENDING:
+                positiveRes = R.string.AliGramPreservationCancelActivation;
+                break;
+            case DISABLED:
+            default:
+                positiveRes = R.string.AliGramPreservationEnable;
+                break;
+        }
+        builder.setPositiveButton(getString(positiveRes), (dialogInterface, i) -> {
+            boolean nowEnabled = AliGramPreservation.togglePreservation(account, did);
+            BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(nowEnabled ? R.string.AliGramPreservationEnabledToast : R.string.AliGramPreservationDisabledToast)).show();
+        });
+        builder.setNeutralButton(getString(R.string.AliGramPreservationClear), (dialogInterface, i) -> {
+            AlertDialog.Builder confirm = new AlertDialog.Builder(getParentActivity());
+            confirm.setTitle(getString(R.string.AliGramPreservationTitle));
+            confirm.setMessage(getString(R.string.AliGramPreservationClearConfirm));
+            confirm.setPositiveButton(getString(R.string.Clear), (d, which) -> {
+                Utilities.globalQueue.postRunnable(() -> {
+                    AliGramPreservation.clearPreservedForDialog(account, did);
+                    AndroidUtilities.runOnUIThread(() -> BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show());
+                });
+            });
+            confirm.setNegativeButton(getString(R.string.Cancel), null);
+            confirm.makeRed(AlertDialog.BUTTON_POSITIVE);
+            showDialog(confirm.create());
+        });
+        builder.setNegativeButton(getString(R.string.Cancel), null);
+        showDialog(builder.create());
     }
 
     private void nkbtn_onclick(int id) {

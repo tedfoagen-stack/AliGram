@@ -68,6 +68,9 @@ public interface DeletedMessageDao {
     @Query("SELECT * FROM deletedmessage WHERE userId = :userId AND dialogId = :dialogId AND messageId IN (:messageIds)")
     List<DeletedMessageFull> getMessagesByIds(long userId, long dialogId, List<Integer> messageIds);
 
+    @Query("SELECT EXISTS(SELECT * FROM deletedmessage WHERE fakeId = :fakeId)")
+    boolean existsByFakeId(long fakeId);
+
     @Insert
     long insert(DeletedMessage msg);
 

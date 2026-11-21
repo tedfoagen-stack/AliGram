@@ -5,6 +5,7 @@ import static org.telegram.messenger.CacheByChatsController.KEEP_MEDIA_TYPE_STOR
 import android.util.SparseArray;
 
 import com.google.android.exoplayer2.util.Log;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -117,7 +118,10 @@ public class AutoDeleteMediaTask {
                                 timeLocal = time - seconds;
                             }
                             long lastUsageTime = Utilities.getLastUsageFileTime(file.file.getAbsolutePath());
-                            boolean needDelete = lastUsageTime > 316000000 && lastUsageTime < timeLocal && !usingFilePaths.contains(file.file.getPath());
+                            boolean needDelete = lastUsageTime > 316000000 && lastUsageTime < timeLocal && !usingFilePaths.contains(file.file.getPath())
+                                    // --- AliGram hook (H-1 sequenced fix):
+                                    // never evict a pinned preservation source
+                                    && !AliGramPreservation.isPathPinned(file.file.getAbsolutePath());
                             if (needDelete) {
                                 try {
                                     if (BuildVars.LOGS_ENABLED) {
@@ -175,6 +179,11 @@ public class AutoDeleteMediaTask {
                         }
                         if (allFiles.get(i).lastUsageDate <= 0) {
                             skippedFiles++;
+                            continue;
+                        }
+                        // --- AliGram hook (H-1 sequenced fix): never evict a
+                        // pinned preservation source by size either.
+                        if (AliGramPreservation.isPathPinned(allFiles.get(i).file.getAbsolutePath())) {
                             continue;
                         }
                         long size = allFiles.get(i).file.length();

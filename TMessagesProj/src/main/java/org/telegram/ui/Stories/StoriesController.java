@@ -17,6 +17,8 @@ import com.google.android.exoplayer2.util.Consumer;
 import org.telegram.SQLite.SQLiteCursor;
 import org.telegram.SQLite.SQLiteDatabase;
 import org.telegram.SQLite.SQLitePreparedStatement;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
@@ -680,7 +682,27 @@ public class StoriesController {
     }
 
     public ArrayList<TL_stories.PeerStories> getDialogListStories() {
-        return dialogListStories;
+        // --- AliGram hidden folders: display-layer only. While locked, a
+        // filtered COPY is returned so no hidden channel's story avatar /
+        // unread dot leaks through the strip (DialogStoriesCell), the
+        // LaunchActivity story preload, or the StoryViewer navigation. All
+        // callers only read the list; the live list is returned unchanged
+        // whenever nothing is hidden.
+        if (AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+            return dialogListStories;
+        }
+        ArrayList<TL_stories.PeerStories> filtered = new ArrayList<>(dialogListStories.size());
+        for (int i = 0, n = dialogListStories.size(); i < n; i++) {
+            TL_stories.PeerStories peerStories = dialogListStories.get(i);
+            if (peerStories == null || peerStories.peer == null) {
+                continue;
+            }
+            long dialogId = DialogObject.getPeerDialogId(peerStories.peer);
+            if (!AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId)) {
+                filtered.add(peerStories);
+            }
+        }
+        return filtered;
     }
 
     public TL_stories.PeerStories getStories(long peerId) {

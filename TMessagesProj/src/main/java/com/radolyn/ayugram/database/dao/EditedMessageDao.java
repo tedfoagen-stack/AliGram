@@ -42,6 +42,11 @@ public interface EditedMessageDao {
     @Query("SELECT mediaPath FROM editedmessage WHERE fakeId = :fakeId LIMIT 1")
     String getMediaPathByFakeId(long fakeId);
 
+    @Query("SELECT EXISTS(SELECT * FROM editedmessage WHERE fakeId = :fakeId)")
+    boolean existsByFakeId(long fakeId);
+
+    /** Returns the inserted row's fakeId (Room auto-generated PK). Phase 2.2 §1.6:
+     *  the bind must never depend on Room's in-place PK assignment. */
     @Insert
-    void insert(EditedMessage revision);
+    long insert(EditedMessage revision);
 }

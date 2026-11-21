@@ -210,7 +210,13 @@ public class NekoGeneralSettingsActivity extends BaseNekoXSettingsActivity {
     private final AbstractConfigCell notificationIconRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getNotificationIcon(), new String[]{
             getString(R.string.MapPreviewProviderTelegram),
             getString(R.string.NagramX),
-            getString(R.string.Nagram),
+            // O-04 (Phase 3.2): was R.string.Nagram ("Nagram") — its icon
+            // (case 2 in NotificationsController.getNotificationIconResId)
+            // is now the AliGram icon, so the label is AliGram too.
+            // R.string.NagramX already displays "AliGram" (rebranded in
+            // Phase 3). Options 1 and 2 are the same icon; both entries are
+            // kept so stored preference values 0-3 keep their meaning.
+            getString(R.string.NagramX),
             getString(R.string.NekoX)
     }, null));
     private final AbstractConfigCell tabletModeRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NekoConfig.tabletMode, new String[]{

@@ -139,6 +139,9 @@ import java.util.stream.Collectors;
 
 import me.vkryl.core.BitwiseUtils;
 
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
+
 import tw.nekomimi.nekogram.NekoConfig;
 import tw.nekomimi.nekogram.filters.AyuFilter;
 import tw.nekomimi.nekogram.filters.ReactionFilter;
@@ -438,6 +441,60 @@ public class MessagesController extends BaseController implements NotificationCe
             return frozenDialogFilters;
         }
         return dialogFilters;
+    }
+
+    // --- AliGram hidden folders: display-layer filtering only. The hidden
+    // dialog cache lives in AliGramHiddenFolders and is keyed by server
+    // filter id; the provider below rebuilds it from DialogFilter
+    // membership (includesDialog over allDialogs) — never from
+    // filter.dialogs, which sortDialogs() itself filters while locked.
+    private boolean aliGramHiddenFiltersExist;
+    private int aliGramHiddenAllDialogsSize = -1;
+
+    /** Never hide Saved Messages (self) or the Replies pseudo-dialog. */
+    public boolean aliGramIsHidden(long dialogId) {
+        if (dialogId == getUserConfig().getClientUserId() || UserObject.isReplyUser(dialogId)) {
+            return false;
+        }
+        return AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId);
+    }
+
+    /**
+     * (Re)registers the hidden-dialog membership provider, prunes hidden
+     * flags for filters that no longer exist, and rebuilds the cache.
+     * Called when filters load/change and on every lock/unlock/hide/unhide
+     * transition (via the UI refresh helper); sortDialogs() also calls it
+     * when the dialog count changed, so dialogs that arrive later and match
+     * a hidden filter are hidden without waiting for a filter event.
+     */
+    public void refreshAliGramHiddenFolders() {
+        ArrayList<Integer> existingIds = new ArrayList<>();
+        for (int i = 0, n = dialogFilters.size(); i < n; i++) {
+            existingIds.add(dialogFilters.get(i).id);
+        }
+        AliGramHiddenFolders.pruneHiddenFilters(currentAccount, existingIds);
+        AliGramHiddenFolders.setDialogsProvider(currentAccount, filterId -> {
+            ArrayList<Long> out = new ArrayList<>();
+            DialogFilter filter = null;
+            for (int i = 0, n = dialogFilters.size(); i < n; i++) {
+                if (dialogFilters.get(i).id == filterId) {
+                    filter = dialogFilters.get(i);
+                    break;
+                }
+            }
+            if (filter == null) {
+                return out;
+            }
+            for (int i = 0, n = allDialogs.size(); i < n; i++) {
+                TLRPC.Dialog d = allDialogs.get(i);
+                if (d != null && filter.includesDialog(getAccountInstance(), d.id, d)) {
+                    out.add(d.id);
+                }
+            }
+            return out;
+        });
+        aliGramHiddenFiltersExist = !AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty();
+        aliGramHiddenAllDialogsSize = allDialogs.size();
     }
 
     private final CacheFetcher<Integer, TLRPC.TL_help_appConfig> appConfigFetcher = new CacheFetcher<Integer, TLRPC.TL_help_appConfig>() {
@@ -2440,6 +2497,10 @@ public class MessagesController extends BaseController implements NotificationCe
 
                 lockFiltersInternal();
 
+                // AliGram hidden folders: filters (re)loaded — prune orphan
+                // flags and rebuild the hidden-dialog cache.
+                refreshAliGramHiddenFolders();
+
                 if (onDone != null) {
                     onDone.run();
                 }
@@ -2574,6 +2635,9 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void onFilterUpdate(DialogFilter filter) {
+        // AliGram hidden folders: a filter changed — rebuild the cache
+        // before sortDialogs() re-reads it.
+        refreshAliGramHiddenFolders();
         for (int a = 0; a < 2; a++) {
             if (selectedDialogFilter[a] == filter) {
                 sortDialogs(null);
@@ -16357,6 +16421,13 @@ public class MessagesController extends BaseController implements NotificationCe
         getMessagesStorage().cleanup(false);
         cleanup();
         getContactsController().deleteUnknownAppAccounts();
+        // --- AliGram hook (P-8): remove this account's preserved blobs,
+        // refs, deferred rows and per-chat activation prefs.
+        try {
+            AliGramPreservation.purgeAccount(currentAccount);
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
     }
 
     public void registerForPush(@PushListenerController.PushType int pushType, String regid) {
@@ -19967,6 +20038,14 @@ public class MessagesController extends BaseController implements NotificationCe
                                 var topicId = MessageObject.getTopicId(currentAccount, msg, isForum(dialogId));
                                 var prefs = new AyuSavePreferences(msg, currentAccount, dialogId, topicId, msg.id, (int)(currentTime / 1000));
                                 ayuMessagesController.onMessageDeleted(prefs);
+                                // --- AliGram hook: the capture above ran
+                                // first — the mark sweep below must not
+                                // terminate the LIVE ref before it binds.
+                                try {
+                                    AliGramPreservation.noteCapturedDelete(currentAccount, dialogId, msg.id);
+                                } catch (Throwable e) {
+                                    FileLog.e(e);
+                                }
                             }
                         }
                         notificationsToSend.put(dialogId, messageIds);
@@ -21482,6 +21561,26 @@ public class MessagesController extends BaseController implements NotificationCe
             }
         }
 
+        // --- AliGram hook (R-7): a server round completed in this process —
+        // a successful getDifference / updates batch. Stamping a PENDING
+        // activation requires this event in the current process, never a
+        // restored timeDifference alone (Phase 2.3 §1.5 + phase3 §3.5).
+        //
+        // Phase 3.1: ONLY for server-originated batches. processUpdateArray
+        // is also called with locally synthesised read-state updates built
+        // from cache (MessagesController:7563, :7791, :7805 — date == 0,
+        // fromGetDifference == false), which prove no server contact and
+        // must never set roundSeen. Server batches arrive either from
+        // getDifference (fromGetDifference == true, date == 0) or from
+        // processUpdates (fromGetDifference == false, date == server time).
+        if (fromGetDifference || date != 0) {
+            try {
+                AliGramPreservation.onServerRoundCompleted(currentAccount);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
+        }
+
         return true;
     }
 
@@ -22390,7 +22489,9 @@ public class MessagesController extends BaseController implements NotificationCe
                         dialogId = encryptedChat.user_id;
                     }
                 }
-                if (filter.includesDialog(getAccountInstance(), dialogId, d)) {
+                // AliGram hidden folders: same display-layer skip as in
+                // sortDialogs() (see above).
+                if (filter.includesDialog(getAccountInstance(), dialogId, d) && !aliGramIsHidden(dialogId)) {
                     if (canAddToForward(d)) {
                         dialogsForward.add(d);
                     }
@@ -22546,6 +22647,12 @@ public class MessagesController extends BaseController implements NotificationCe
         if (chatsDict == null && ApplicationLoader.mainInterfacePaused) {
             return;
         }
+        // AliGram hidden folders: dialogs arrived/left since the last
+        // rebuild — refresh the cache (cheap size check; the rebuild itself
+        // only runs when hidden filters exist and the count changed).
+        if (aliGramHiddenFiltersExist && allDialogs.size() != aliGramHiddenAllDialogsSize) {
+            refreshAliGramHiddenFolders();
+        }
         dialogsServerOnly.clear();
         dialogsCanAddUsers.clear();
         dialogsMyGroups.clear();
@@ -22604,7 +22711,11 @@ public class MessagesController extends BaseController implements NotificationCe
                                 dialogId = encryptedChat.user_id;
                             }
                         }
-                        if (sortingDialogFilter.includesDialog(getAccountInstance(), dialogId, d)) {
+                        // AliGram hidden folders: display-layer only — a
+                        // dialog in a hidden filter stays out of the
+                        // filter's list (and forward list) while locked.
+                        // Never mutates dialogs_dict / allDialogs.
+                        if (sortingDialogFilter.includesDialog(getAccountInstance(), dialogId, d) && !aliGramIsHidden(dialogId)) {
                             if (canAddToForward(d)) {
                                 dialogsForward.add(d);
                             }

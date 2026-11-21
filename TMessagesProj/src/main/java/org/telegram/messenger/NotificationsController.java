@@ -65,6 +65,7 @@ import androidx.core.graphics.ColorUtils;
 import androidx.core.graphics.drawable.IconCompat;
 
 import com.google.common.collect.Lists;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 
 import org.telegram.messenger.support.LongSparseIntArray;
 import org.telegram.messenger.utils.tlutils.TlUtils;
@@ -1030,6 +1031,16 @@ public class NotificationsController extends BaseController implements Notificat
         if (messageObjects != null) {
             for (int i = 0; i < messageObjects.size(); ++i) {
                 final MessageObject messageObject = messageObjects.get(i);
+                // --- AliGram hidden folders: a conference call in a hidden
+                // dialog must not ring/show while locked. Drop the message
+                // from the notification pipeline entirely (receipt/storage
+                // are upstream of this method and untouched).
+                if (messageObject != null && messageObject.messageOwner != null
+                        && AliGramHiddenFolders.isDialogHidden(currentAccount, messageObject.getDialogId())) {
+                    messageObjects.remove(i);
+                    i--;
+                    continue;
+                }
                 if (messageObject != null && messageObject.messageOwner != null&& !messageObject.isOutOwner() && messageObject.messageOwner.action instanceof TLRPC.TL_messageActionConferenceCall) {
                     final TLRPC.TL_messageActionConferenceCall action = (TLRPC.TL_messageActionConferenceCall) messageObject.messageOwner.action;
                     if (!action.active && !action.missed && (getConnectionsManager().getCurrentTime() - messageObject.messageOwner.date) < getMessagesController().callRingTimeout / 1000L) {
@@ -1074,6 +1085,15 @@ public class NotificationsController extends BaseController implements Notificat
 
             for (int a = 0; a < messageObjects.size(); a++) {
                 MessageObject messageObject = messageObjects.get(a);
+                // --- AliGram hidden folders: single notification gate.
+                // Locked + hidden dialog => no notification of any kind
+                // (message, story, popup, sound), and no putPushMessage row
+                // below, so it cannot resurrect from the DB after restart.
+                // Message receipt/storage are upstream and untouched.
+                if (messageObject != null && messageObject.messageOwner != null
+                        && AliGramHiddenFolders.isDialogHidden(currentAccount, messageObject.getDialogId())) {
+                    continue;
+                }
                 if (messageObject.messageOwner != null && (messageObject.isImportedForward() ||
                         messageObject.messageOwner.action instanceof TLRPC.TL_messageActionSetMessagesTTL ||
                         messageObject.messageOwner.silent && (messageObject.messageOwner.action instanceof TLRPC.TL_messageActionContactSignUp || messageObject.messageOwner.action instanceof TLRPC.TL_messageActionUserJoined)) ||
@@ -1733,6 +1753,35 @@ public class NotificationsController extends BaseController implements Notificat
         });
     }
 
+    // --- AliGram hidden folders: unread push totals belonging to hidden
+    // dialogs, for the launcher-badge subtraction in
+    // getTotalAllUnreadCount(). pushDialogs maps dialog id -> unread push
+    // count; the subtraction mirrors how total_unread_count / size() are
+    // built from it.
+    private static int aliGramHiddenPushUnread(NotificationsController controller, int account) {
+        int sum = 0;
+        for (int i = 0, n = controller.pushDialogs.size(); i < n; i++) {
+            long did = controller.pushDialogs.keyAt(i);
+            Integer c = controller.pushDialogs.valueAt(i);
+            if (c != null && AliGramHiddenFolders.isDialogHidden(account, did)) {
+                sum += c;
+            }
+        }
+        return sum;
+    }
+
+    private static int aliGramHiddenPushDialogs(NotificationsController controller, int account) {
+        int count = 0;
+        for (int i = 0, n = controller.pushDialogs.size(); i < n; i++) {
+            long did = controller.pushDialogs.keyAt(i);
+            Integer c = controller.pushDialogs.valueAt(i);
+            if (c != null && c > 0 && AliGramHiddenFolders.isDialogHidden(account, did)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private int getTotalAllUnreadCount() {
         int count = 0;
         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
@@ -1754,6 +1803,11 @@ public class NotificationsController extends BaseController implements Notificat
                         final ArrayList<TLRPC.Dialog> dialogs = new ArrayList<>(MessagesController.getInstance(a).allDialogs);
                         for (int i = 0, N = dialogs.size(); i < N; i++) {
                             TLRPC.Dialog dialog = dialogs.get(i);
+                            // --- AliGram hidden folders: hidden dialogs
+                            // contribute nothing to the launcher badge.
+                            if (dialog != null && AliGramHiddenFolders.isDialogHidden(a, dialog.id)) {
+                                continue;
+                            }
                             if (dialog != null && DialogObject.isChatDialog(dialog.id)) {
                                 TLRPC.Chat chat = getMessagesController().getChat(-dialog.id);
                                 if (ChatObject.isNotInChat(chat) || ChatObject.isCommunity(chat)) {
@@ -1768,13 +1822,17 @@ public class NotificationsController extends BaseController implements Notificat
                         FileLog.e(e);
                     }
                 } else {
-                    count += controller.total_unread_count;
+                    count += Math.max(0, controller.total_unread_count - aliGramHiddenPushUnread(controller, a));
                 }
             } else {
                 if (controller.showBadgeMuted) {
                     try {
                         for (int i = 0, N = MessagesController.getInstance(a).allDialogs.size(); i < N; i++) {
                             TLRPC.Dialog dialog = MessagesController.getInstance(a).allDialogs.get(i);
+                            // --- AliGram hidden folders: see above.
+                            if (dialog != null && AliGramHiddenFolders.isDialogHidden(a, dialog.id)) {
+                                continue;
+                            }
                             if (DialogObject.isChatDialog(dialog.id)) {
                                 TLRPC.Chat chat = getMessagesController().getChat(-dialog.id);
                                 if (ChatObject.isNotInChat(chat) || ChatObject.isCommunity(chat)) {
@@ -1790,7 +1848,7 @@ public class NotificationsController extends BaseController implements Notificat
                         FileLog.e(e, false);
                     }
                 } else {
-                    count += controller.pushDialogs.size();
+                    count += Math.max(0, controller.pushDialogs.size() - aliGramHiddenPushDialogs(controller, a));
                 }
             }
         }
@@ -6325,9 +6383,14 @@ public class NotificationsController extends BaseController implements Notificat
             case 0:
                 return R.drawable.notification;
             case 1:
-                return R.drawable.nagramx_notification;
+                return R.drawable.aligram_notification;
             case 2:
-                return R.drawable.nagram_notification;
+                // O-04 (Phase 3.2): was R.drawable.nagram_notification (legacy
+                // Nagram icon, now deleted). Re-pointed at the AliGram
+                // notification icon; option 2 is therefore the same icon as
+                // option 1. The entry is kept (not removed) so stored
+                // preference values 0-3 keep their meaning.
+                return R.drawable.aligram_notification;
             case 3:
                 return R.drawable.neko_notification;
         }

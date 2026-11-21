@@ -606,6 +606,42 @@ object NaConfig {
             ConfigItem.configTypeBool,
             true
         )
+    // --- AliGram: adjustable preservation limits (2026-11-15). Global
+    // (shared "nkmrcfg" prefs). A cap of 0 means "default": the legacy
+    // per-network constants in AliGramEligibility (video 10 MiB mobile /
+    // 15 MiB Wi-Fi, documents 1 MiB / 3 MiB). The custom video cap is a
+    // string so the settings UI can offer a free-form input; it is parsed
+    // at read time and only 1..100 is honored.
+    val aliGramVideoCapMb =
+        addConfig(
+            "AliGramVideoCapMB",
+            ConfigItem.configTypeInt,
+            0
+        )
+    val aliGramVideoCapCustomMb =
+        addConfig(
+            "AliGramVideoCapCustomMB",
+            ConfigItem.configTypeString,
+            ""
+        )
+    val aliGramDocCapMb =
+        addConfig(
+            "AliGramDocCapMB",
+            ConfigItem.configTypeInt,
+            0
+        )
+    val aliGramMaxFilesPerChat =
+        addConfig(
+            "AliGramMaxFilesPerChat",
+            ConfigItem.configTypeInt,
+            25
+        )
+    val aliGramBudgetMbPerChat =
+        addConfig(
+            "AliGramBudgetMBPerChat",
+            ConfigItem.configTypeInt,
+            500
+        )
     val saveDeletedMessageForBot =
         addConfig(
             "SaveDeletedMessageForBot", // save in bot chats

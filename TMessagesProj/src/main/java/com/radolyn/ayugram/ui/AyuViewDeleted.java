@@ -33,9 +33,11 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.radolyn.ayugram.AyuConstants;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.entities.DeletedMessageFull;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 import com.radolyn.ayugram.proprietary.AyuMessageUtils;
+import com.radolyn.ayugram.utils.AyuFileLocation;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.DialogObject;
@@ -1262,6 +1264,29 @@ public class AyuViewDeleted extends NekoDelegateFragment {
         }
 
         tl.ayuDeleted = true;
+        // --- AliGram hook (H-R): play the deleted message from its
+        // preserved blob copy when one exists. The server copy may be
+        // unreferenceable after deletion (R-07); the legacy public-dir
+        // copy is used when no blob exists. UI-safe: map lookup only.
+        try {
+            File preservedFile = AliGramPreservation.resolvePreservedFileForRevision(currentAccount, base.fakeId);
+            if (preservedFile == null) {
+                preservedFile = AliGramPreservation.resolvePreservedFileForMessage(currentAccount, base.dialogId, base.messageId);
+            }
+            if (preservedFile != null) {
+                tl.attachPath = preservedFile.getAbsolutePath();
+                if (tl.media instanceof TLRPC.TL_messageMediaDocument && tl.media.document != null) {
+                    tl.media.document.localPath = preservedFile.getAbsolutePath();
+                } else if (tl.media instanceof TLRPC.TL_messageMediaPhoto && tl.media.photo != null) {
+                    TLRPC.PhotoSize largest = FileLoader.getClosestPhotoSizeWithSize(tl.media.photo.sizes, AndroidUtilities.getPhotoSize());
+                    if (largest != null) {
+                        largest.location = new AyuFileLocation(preservedFile.getAbsolutePath());
+                    }
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
         return new MessageObject(getCurrentAccount(), tl, false, true);
     }
 

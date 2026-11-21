@@ -54,6 +54,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.LinearSmoothScroller;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.Emoji;
@@ -2198,6 +2199,11 @@ public class FilterTabsView extends FrameLayout {
         removeTabs();
         for (int a = 0, N = filters.size(); a < N; a++) {
             MessagesController.DialogFilter dialogFilter = filters.get(a);
+            // --- AliGram hidden folders: skip the tab while locked. Tab ids
+            // stay the filter indices, so counters/selection keep working.
+            if (!AliGramHiddenFolders.isUnlocked(UserConfig.selectedAccount) && AliGramHiddenFolders.isFilterHidden(UserConfig.selectedAccount, dialogFilter.id)) {
+                continue;
+            }
             if (filters.get(a).isDefault()) {
                 if (showAllChatsTab)
                     addTab(a, 0, LocaleController.getString("FilterAllChats", R.string.FilterAllChats), null, null, false, true, false);
