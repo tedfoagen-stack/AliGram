@@ -19,6 +19,7 @@ import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.radolyn.ayugram.AyuConstants;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
@@ -53,7 +54,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import kotlin.Unit;
 import tw.nekomimi.nekogram.NekoConfig;
@@ -642,6 +647,27 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
     private void loadAliGramPreservedSize() {
         Utilities.globalQueue.postRunnable(() -> {
             long[] stats = AliGramPreservation.getPreservedStats(currentAccount);
+            // --- AliGram hidden folders: the aggregate row shows only a
+            // count (no names), but that count must still exclude hidden
+            // dialogs while locked. Per-dialog figures come from
+            // getPreservedStatsForDialog ({refs, blobs, bytes}); the
+            // aggregate's [0] is the opted-in chat count, so a hidden
+            // opted-in dialog subtracts 1 there. Note the shared-blob
+            // caveat: blobs/bytes shared between dialogs are counted once
+            // in the total, so the filtered total is exact only when a
+            // blob belongs to a single dialog; the core helper clamps at 0.
+            if (!AliGramHiddenFolders.isUnlocked(currentAccount) && !AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+                Map<Long, long[]> perDialog = new HashMap<>();
+                Set<Long> hidden = new HashSet<>();
+                for (long dialogId : AliGramPreservation.optedInDialogIds(currentAccount)) {
+                    if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId)) {
+                        hidden.add(dialogId);
+                        long[] s = AliGramPreservation.getPreservedStatsForDialog(currentAccount, dialogId);
+                        perDialog.put(dialogId, new long[]{1, s[1], s[2]});
+                    }
+                }
+                stats = AliGramHiddenFolders.filterPreservedStats(stats, perDialog, hidden);
+            }
             AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(stats), 500);
         });
     }
