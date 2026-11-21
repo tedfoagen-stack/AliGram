@@ -100,6 +100,8 @@ import com.google.common.primitives.Longs;
 // import com.google.firebase.appindexing.builders.AssistActionBuilder;
 
 import org.telegram.PhoneFormat.PhoneFormat;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.AnimationNotificationsLocker;
@@ -6910,6 +6912,19 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onStop() {
         super.onStop();
+        // --- AliGram hidden folders: re-lock on true background. Deliberately
+        // onStop, NOT onPause (which also fires for transient pauses such as
+        // permission dialogs and picture-in-picture; the passcode precedent
+        // uses onPause, we differ on purpose). All activated accounts are
+        // locked: an account left unlocked by switching away must not stay
+        // unlocked while the app is backgrounded. Process death locks
+        // anyway (in-memory flag). The auto-lock timer is cancelled by
+        // lock(); the UI refresh happens on return (onResume below).
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+            if (UserConfig.getInstance(a).isClientActivated()) {
+                AliGramHiddenFolders.lock(a);
+            }
+        }
         isStarted = false;
         pipActivityHandler.onStop();
         Browser.unbindCustomTabsService(this);
@@ -7099,6 +7114,22 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         MediaController.getInstance().setFeedbackView(feedbackView = actionBarLayout.getView(), true);
         ApplicationLoader.mainInterfacePaused = false;
         MessagesController.getInstance(currentAccount).sortDialogs(null);
+        // --- AliGram hidden folders: if the 1-hour auto-lock expired (or a
+        // background lock happened) while a hidden chat was open, close
+        // that chat now — closeChats with the dialog id closes only that
+        // chat. The dialog list underneath refreshes via its own onResume.
+        if (AliGramHiddenFolders.isAutoLockExpired(currentAccount, System.currentTimeMillis())) {
+            AliGramHiddenFolders.lock(currentAccount);
+        }
+        if (!AliGramHiddenFolders.isUnlocked(currentAccount)) {
+            BaseFragment aliGramTopFragment = getLastFragment();
+            if (aliGramTopFragment instanceof ChatActivity) {
+                long aliGramDialogId = ((ChatActivity) aliGramTopFragment).getDialogId();
+                if (AliGramHiddenFolders.isDialogHidden(currentAccount, aliGramDialogId)) {
+                    NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.closeChats, aliGramDialogId);
+                }
+            }
+        }
         showLanguageAlert(false);
         Utilities.stageQueue.postRunnable(() -> {
             ApplicationLoader.mainInterfacePausedStageQueue = false;
