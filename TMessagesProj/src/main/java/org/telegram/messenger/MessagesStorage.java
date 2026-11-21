@@ -12830,11 +12830,15 @@ public class MessagesStorage extends BaseController {
                     // preservation. Runs after the REPLACE above (so the row
                     // now exists) but the pre-existence probe was taken at
                     // the loop top, before the row was written.
+                    // DOMINANCE (2026-11-21): no folder/mute/post plumbing
+                    // is passed any more — the Archive gate is removed and
+                    // the channel-post rule (megagroup passes) is computed
+                    // inside maybeIngest from the resolved chat. The
+                    // upstream auto-download block above keeps its own
+                    // folder check (getDialogFolderIdInternal), untouched.
                     try {
-                        boolean aligramArchived = getDialogFolderIdInternal(message.dialog_id) == 1;
-                        boolean aligramChannelPostOk = message.peer_id == null || message.peer_id.channel_id == 0 || message.post;
                         Boolean aligramPreExisting = aligramPreExistingByIndex[a];
-                        AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting, aligramArchived, aligramChannelPostOk);
+                        AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting);
                     } catch (Throwable e) {
                         FileLog.e(e);
                     }
