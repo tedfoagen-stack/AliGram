@@ -1,0 +1,69 @@
+From b6918860d43053b40586ead558a1df5b0727fe86 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:18:43 +0000
+Subject: [PATCH 07/67] fix(aligram): build without a Firebase project for
+ app.aligram
+
+processDebugGoogleServices failed the first feature build: the
+upstream google-services.json has no client for the new applicationId
+app.aligram, and no real AliGram Firebase project exists. Do not
+invent a client entry (that would fabricate Firebase credentials).
+Instead, stop applying the Google Services plugin (with a comment
+explaining when to re-apply it) and guard the
+FirebaseCrashlytics.getInstance() call in ApplicationLoader so a
+missing default FirebaseApp can never crash app startup; Crashlytics
+collection is already forced off and the Google push provider already
+catches its own Firebase failures. FCM and Crashlytics mapping upload
+stay inert until AliGram has a real Firebase project.
+---
+ TMessagesProj/build.gradle                            | 11 ++++++++++-
+ .../org/telegram/messenger/ApplicationLoader.java     | 11 ++++++++++-
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
+index 81adafa08..fc8870908 100644
+--- a/TMessagesProj/build.gradle
++++ b/TMessagesProj/build.gradle
+@@ -3,7 +3,16 @@ import org.gradle.internal.os.OperatingSystem
+ 
+ plugins {
+     id 'com.android.application'
+-    id 'com.google.gms.google-services'
++    // NOTE (AliGram): the Google Services plugin is intentionally NOT applied.
++    // It reads TMessagesProj/google-services.json and fails the build when no
++    // client matches the applicationId — the upstream file only has a client
++    // for nu.gpu.nagram, and AliGram (app.aligram) has no Firebase project
++    // yet. Do NOT add a fabricated client entry: that would invent Firebase
++    // credentials. Re-apply this plugin only when AliGram has a real Firebase
++    // project and a real google-services.json client for app.aligram.
++    // Until then FCM and Crashlytics mapping upload are inert by design
++    // (Crashlytics collection is already forced off in AndroidUtil, and the
++    // getInstance() call below is guarded against a missing default app).
+     id 'com.google.firebase.crashlytics'
+ }
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java b/TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java
+index 1eb80ef90..0b7eb2380 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java
+@@ -276,7 +276,16 @@ public class ApplicationLoader extends Application {
+         NekoConfig.init();
+         NaConfig.init();
+         SharedPrefsHelper.init(applicationContext);
+-        FirebaseCrashlytics.getInstance().setCrashlyticsCollectionEnabled(AndroidUtil.shouldEnableCrashlytics());
++        // AliGram: no Firebase project is configured for app.aligram yet
++        // (see the build.gradle note), so there may be no default FirebaseApp
++        // and getInstance() throws IllegalStateException. Crashlytics is
++        // inert until a real Firebase project is added; never let it crash
++        // app startup.
++        try {
++            FirebaseCrashlytics.getInstance().setCrashlyticsCollectionEnabled(AndroidUtil.shouldEnableCrashlytics());
++        } catch (IllegalStateException e) {
++            FileLog.e(e);
++        }
+         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) { //TODO improve account
+             UserConfig.getInstance(a).loadConfig();
+             MessagesController.getInstance(a);
+-- 
+2.43.0
+

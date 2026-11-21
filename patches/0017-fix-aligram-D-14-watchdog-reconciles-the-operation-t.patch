@@ -1,0 +1,170 @@
+From bd0da92b4ed68ac5102a7595af9a5dfbb1ef40b1 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:59:56 +0000
+Subject: [PATCH 17/67] =?UTF-8?q?fix(aligram):=20D-14=20=E2=80=94=20watchd?=
+ =?UTF-8?q?og=20reconciles=20the=20operation=20temp=20file=20(completed-pr?=
+ =?UTF-8?q?eload=20swallow)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified the swallow mechanics against current code: loadFileInternal
+reuse converts a finished preload op to a full load
+(FileLoader.java:857-875); setIsPreloadVideoOperation(false) restarts a
+finished op (FileLoadOperation.java:1308-1333); start() with
+downloadedBytes == totalBytesCount finishes with preload=true
+(:1263-1266 -> :1547-1565); FileLoader's delegate early-returns
+(:1018-1021) with no fileLoaded. The probe cannot rescue it — the
+fresh operation re-swallows — and checkDownloadQueue removes the op
+from loadOperationPaths (:1225), so no live operation exists to ask.
+Fix: new FileLoader.getTempPathToAttach(attach) — live operation's
+current temp file when present, else the temp name derived exactly as
+FileLoadOperation.setPaths builds it (<stem>.temp in MEDIA_DIR_CACHE;
+tempDir is always that dir, FileLoader.java:889); encrypted .temp.enc
+is never returned. watchdogCheck step (1b) treats a temp file whose
+length EQUALS the expected size as a complete source and copies from
+it directly (copyVerified still enforces size + SHA). The temp copy
+is guarded by copyVerified's grown/shrunk-mid-copy checks, so a
+still-growing temp only wastes one attempt.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 54 +++++++++++++++++++
+ .../org/telegram/messenger/FileLoader.java    | 44 +++++++++++++++
+ 2 files changed, 98 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 5a79f9ebf..4315a4c55 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1078,6 +1078,10 @@ public final class AliGramPreservation {
+      * {@code FileLoader.didFinishLoadingFile} (preload-finished early
+      * return) and never publishes {@code fileLoaded}. The watchdog: (1)
+      * reconcile — if the file is already complete on disk, copy directly;
++     * (1b, Phase 3.1 D-14) reconcile the operation's TEMP file too — a
++     * whole-file preload leaves the complete bytes in {@code <stem>.temp}
++     * with no final file, and the probe in (2) would re-swallow, so a
++     * temp file whose length equals the expected size is copied directly;
+      * (2) otherwise re-issue {@code loadFile} as a probe (after the
+      * swallow, the operation was removed from {@code loadOperationPaths},
+      * so the probe creates a fresh operation whose already-exists path
+@@ -1119,6 +1123,32 @@ public final class AliGramPreservation {
+             copyForRef(refId, onDisk);
+             return;
+         }
++        // (1b) Phase 3.1 (D-14): the completed-preload swallow leaves the
++        // WHOLE file in the operation's temp file (<stem>.temp in
++        // MEDIA_DIR_CACHE) with no final file and no fileLoaded — and the
++        // probe in step (2) re-swallows, because a fresh operation's
++        // start() sees downloadedBytes == totalBytesCount and finishes
++        // with preload=true again. So a temp file whose length EQUALS
++        // the expected size is a complete source: copy from it directly.
++        // copyVerified still enforces size + SHA, so a partial temp is
++        // never bound. (A longer temp cannot happen for this attach — the
++        // temp name is per-attach — but == is used deliberately: the
++        // copy would reject a mismatch anyway.)
++        File tempSource = resolveTempSourceFile(job, load);
++        if (tempSource != null && tempSource.isFile() && job.expectedSize > 0
++                && tempSource.length() == job.expectedSize) {
++            FileLog.d(TAG + ": watchdog reconciled complete temp file on disk for ref " + refId
++                    + " (completed-preload swallow, D-14)");
++            job.sourcePath = tempSource.getAbsolutePath();
++            job.sourceSize = tempSource.length();
++            job.sourceMtime = tempSource.lastModified();
++            job.state = AliGramEligibility.STATE_COPYING;
++            dao.updateRef(job);
++            mirrorPut(job);
++            refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
++            copyForRef(refId, tempSource);
++            return;
++        }
+         // (2) Probe: re-issue loadFile.
+         if (load.probeCount >= MAX_WATCHDOG_PROBES) {
+             FileLog.d(TAG + ": watchdog probe budget exhausted for ref " + refId + "; leaving for startup re-drive");
+@@ -1148,6 +1178,30 @@ public final class AliGramPreservation {
+         return null;
+     }
+ 
++    /**
++     * Phase 3.1 (D-14): the operation's temp file for a job (see
++     * {@code FileLoader.getTempPathToAttach}). Only a plain {@code .temp}
++     * file is ever accepted here — never a {@code .temp.enc} (ciphertext
++     * must never be copied as a blob) and never a final file (step (1)
++     * already handles that). Returns null when there is no temp candidate.
++     */
++    private static File resolveTempSourceFile(PreservedRef job, PendingLoad load) {
++        try {
++            FileLoader loader = FileLoader.getInstance(job.accountId);
++            File temp = null;
++            if (load.photoSize != null) {
++                temp = loader.getTempPathToAttach(load.photoSize);
++            } else if (load.document != null) {
++                temp = loader.getTempPathToAttach(load.document);
++            }
++            if (temp != null && temp.getName().endsWith(".temp")) {
++                return temp;
++            }
++        } catch (Throwable ignored) {
++        }
++        return null;
++    }
++
+     // ==================================================================
+     // Copy worker (single-writer for the state column, on copyQueue)
+     // ==================================================================
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
+index 3d79a5a03..65ea7abd5 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
+@@ -1464,6 +1464,50 @@ public class FileLoader extends BaseController {
+         return new File(dir, getAttachFileName(attach, ext));
+     }
+ 
++    /**
++     * AliGram (Phase 3.1, D-14): the in-progress temp file for an attach,
++     * mirroring {@link #getPathToAttach(TLObject)}. The completed-preload
++     * swallow removes the operation from {@code loadOperationPaths} (via
++     * {@code checkDownloadQueue}), so a live-operation lookup alone would
++     * miss exactly the case the watchdog must rescue: when no operation
++     * exists, the temp name is derived the way
++     * {@code FileLoadOperation.setPaths} builds it — {@code <stem>.temp}
++     * in {@code MEDIA_DIR_CACHE} (tempDir is always that directory,
++     * {@code FileLoader:889}), where {@code <stem>} is the attach file
++     * name without its extension (document {@code <dc>_<id>.mp4} →
++     * {@code <dc>_<id>.temp}; photo {@code <vol>_<local>.jpg} →
++     * {@code <vol>_<local>.temp}; web {@code <md5>.ext} →
++     * {@code <md5>.temp}). Encrypted downloads ({@code .temp.enc}) are
++     * NOT returned here — callers must never copy ciphertext as a blob.
++     * The returned file may not exist; callers check that, and the
++     * length-equals-expected-size check decides completeness.
++     */
++    public File getTempPathToAttach(TLObject attach) {
++        if (attach == null) {
++            return null;
++        }
++        String fileName = getAttachFileName(attach);
++        if (fileName == null || fileName.isEmpty()) {
++            return null;
++        }
++        FileLoadOperation operation = loadOperationPaths.get(fileName);
++        if (operation != null) {
++            try {
++                File current = operation.getCurrentFileFast();
++                if (current != null && current.getName().endsWith(".temp")) {
++                    return current;
++                }
++                // Finished with the final file ready: the normal
++                // final-path reconcile handles it; there is no temp.
++                return null;
++            } catch (Throwable ignored) {
++            }
++        }
++        int dot = fileName.lastIndexOf('.');
++        String stem = dot > 0 ? fileName.substring(0, dot) : fileName;
++        return new File(getDirectory(MEDIA_DIR_CACHE), stem + ".temp");
++    }
++
+     public FilePathDatabase getFileDatabase() {
+         return filePathDatabase;
+     }
+-- 
+2.43.0
+

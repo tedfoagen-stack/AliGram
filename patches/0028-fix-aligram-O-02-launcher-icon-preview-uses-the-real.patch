@@ -1,0 +1,44 @@
+From e15b948895b55b8869a19d55c1a8899737f4d419 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:39:03 +0000
+Subject: [PATCH 28/67] =?UTF-8?q?fix(aligram):=20O-02=20=E2=80=94=20launch?=
+ =?UTF-8?q?er=20icon=20preview=20uses=20the=20real=20adaptive-icon=20layer?=
+ =?UTF-8?q?s?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+LauncherIcon.DEFAULT passed R.mipmap.ic_launcher_aligram for both
+background and foreground, so the selector/preview rendered the full
+icon twice, layered. It now passes R.drawable
+.ic_launcher_aligram_background / .ic_launcher_aligram_foreground — the
+same pair mipmap-anydpi-v26/ic_launcher_aligram.xml uses, and the same
+background/foreground split the old multi-icon enum used. Manifest icon
+untouched.
+---
+ .../main/java/org/telegram/ui/LauncherIconController.java | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java b/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
+index 05b4e5fd1..0b932bcbc 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
+@@ -36,8 +36,14 @@ public class LauncherIconController {
+     // --- AliGram: a single launcher icon. The Nagram icon variants were
+     // removed from the manifest (BRANDING.md); the selector therefore
+     // offers only the original AliGram icon.
++    // O-02 (Phase 3.2): background/foreground are the adaptive-icon layers
++    // (the same pair mipmap-anydpi-v26/ic_launcher_aligram.xml uses),
++    // NOT the full icon twice — AppIconsSelectorCell renders background
++    // via setImageResource and foreground via setForeground, so passing
++    // the full icon for both showed it doubled, layered. The manifest
++    // icon itself is untouched.
+     public enum LauncherIcon {
+-        DEFAULT("DefaultIcon", R.mipmap.ic_launcher_aligram, R.mipmap.ic_launcher_aligram, R.string.AppIconDefault);
++        DEFAULT("DefaultIcon", R.drawable.ic_launcher_aligram_background, R.drawable.ic_launcher_aligram_foreground, R.string.AppIconDefault);
+ 
+         public final String key;
+         public final int background;
+-- 
+2.43.0
+

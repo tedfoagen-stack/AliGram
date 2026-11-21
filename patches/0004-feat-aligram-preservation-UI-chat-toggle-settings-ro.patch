@@ -1,0 +1,560 @@
+From 8a07a5c5a7fee69b36eaf84f39d2f88d468a9052 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:09:23 +0000
+Subject: [PATCH 04/67] =?UTF-8?q?feat(aligram):=20preservation=20UI=20?=
+ =?UTF-8?q?=E2=80=94=20chat=20toggle,=20settings=20row,=20render=20guard,?=
+ =?UTF-8?q?=20About?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ChatActivity: 'Preserve media' header-menu item (groups/channels,
+next to View Deleted) opening a dialog with the per-chat state
+(ON/OFF, PENDING activation notice), preserved-items stats loaded on
+a background thread, enable/disable toggle and per-chat clear.
+NekoExperimentalSettingsActivity: AliGram preserved-media row in the
+Ayu section (enabled chats + stored size, refreshed async) with a
+confirmed clear-all action that keeps per-chat opt-ins
+(clearPreservedStorage).
+H-R render guard: AyuMessageHistory prefers the preserved blob for a
+revision; AyuViewDeleted plays a deleted message from its blob when
+one exists (R-07 fallback). Both are UI-safe map lookups, never DAO.
+NekoAboutActivity: AliGram row with the based-on-NagramX statement,
+feature summary and GPLv3 notice.
+New strings in strings_nax.xml. Controller additions:
+clearPreservedStorage, getPreservedStatsForDialog, per-account
+getPreservedStats (was global), getUnreferencedBlobs sweep (purge and
+clear now drop orphaned blob rows promptly).
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 109 +++++++++++++++++-
+ .../ayugram/aligram/PreservedBlobDao.java     |   6 +
+ .../ayugram/aligram/PreservedRefDao.java      |   3 +
+ .../radolyn/ayugram/ui/AyuMessageHistory.java |  17 ++-
+ .../radolyn/ayugram/ui/AyuViewDeleted.java    |  25 ++++
+ .../java/org/telegram/ui/ChatActivity.java    |  62 ++++++++++
+ .../nekogram/settings/NekoAboutActivity.java  |  16 ++-
+ .../NekoExperimentalSettingsActivity.java     |  38 ++++++
+ .../src/main/res/values/strings_nax.xml       |  18 +++
+ 9 files changed, 289 insertions(+), 5 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index f630e9d17..50723b348 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -24,6 +24,7 @@ import org.telegram.tgnet.TLRPC;
+ 
+ import java.io.File;
+ import java.util.ArrayList;
++import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -2516,11 +2517,65 @@ public final class AliGramPreservation {
+     /** Storage stats for the settings row: {enabledChats, blobCount, totalBytes}.
+      *  Background thread only (Room queries). Callers on the UI thread must
+      *  post to a background queue and update the UI from the result. */
++    /** Settings "clear preserved media": drop every ref + deferred row of
++     * this account, delete the blob subtree, and drop blob rows no ref
++     * points at. Per-chat opt-ins and activation timestamps are KEPT
++     * (unlike purgeAccount) so enabled chats keep preserving new media. */
++    public static void clearPreservedStorage(int account) {
++        try {
++            long userId = ownUserId(account);
++            if (ensureInitialized(account)) {
++                copyQueue.postRunnable(() -> {
++                    try {
++                        PreservedRefDao dao = AliGramData.refDao();
++                        DeferredDeleteDao deferredDao = AliGramData.deferredDao();
++                        if (dao != null) {
++                            for (PreservedRef ref : dao.getAllRefs()) {
++                                if (ref.accountId == account) {
++                                    forgetResolvedFilesForRef(ref);
++                                    mirrorRemoveForRef(ref);
++                                }
++                            }
++                            dao.deleteRefsForAccount(userId);
++                        }
++                        if (deferredDao != null) {
++                            deferredDao.deleteForAccount(account);
++                        }
++                        sweepUnreferencedBlobs();
++                        File blobDir = AliGramFileCopy.getBlobDir(account);
++                        deleteDirectoryRecursive(blobDir);
++                        pendingLoads.entrySet().removeIf(entry -> entry.getKey().startsWith(account + "|"));
++                    } catch (Throwable e) {
++                        FileLog.e(TAG + ": clearPreservedStorage worker failed", e);
++                    }
++                });
++            }
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": clearPreservedStorage failed", e);
++        }
++    }
++
++    /** Drop blob rows no PreservedRef points at (recomputed, ignoring the
++     * stored refCount — a purge/clear leaves it stale). */
++    private static void sweepUnreferencedBlobs() {
++        try {
++            PreservedBlobDao blobDao = AliGramData.blobDao();
++            if (blobDao == null) {
++                return;
++            }
++            for (PreservedBlob blob : blobDao.getUnreferencedBlobs()) {
++                blobDao.deleteById(blob.blobId);
++            }
++        } catch (Throwable ignored) {
++        }
++    }
++
+     public static long[] getPreservedStats(int account) {
+         try {
+             if (!ensureInitialized(account)) {
+                 return new long[]{0, 0, 0};
+             }
++            PreservedRefDao dao = AliGramData.refDao();
+             PreservedBlobDao blobDao = AliGramData.blobDao();
+             int enabledChats = 0;
+             try {
+@@ -2531,14 +2586,63 @@ public final class AliGramPreservation {
+                 }
+             } catch (Throwable ignored) {
+             }
+-            long blobs = blobDao == null ? 0 : blobDao.countBlobs();
+-            long bytes = blobDao == null ? 0 : blobDao.totalBytes();
++            // Per-account (the blob table itself is global, but a blob only
++            // counts here when one of this account's refs points at it).
++            long blobs = 0;
++            long bytes = 0;
++            try {
++                if (dao != null && blobDao != null) {
++                    HashSet<String> seen = new HashSet<>();
++                    for (PreservedRef ref : dao.getRefsForAccount(account)) {
++                        if (ref.blobId == null || !seen.add(ref.blobId)) {
++                            continue;
++                        }
++                        PreservedBlob blob = blobDao.getById(ref.blobId);
++                        if (blob != null) {
++                            blobs++;
++                            bytes += blob.size;
++                        }
++                    }
++                }
++            } catch (Throwable ignored) {
++            }
+             return new long[]{enabledChats, blobs, bytes};
+         } catch (Throwable e) {
+             return new long[]{0, 0, 0};
+         }
+     }
+ 
++    /** Per-chat stats for the chat dialog: {refs, copied blobs, bytes}. */
++    public static long[] getPreservedStatsForDialog(int account, long dialogId) {
++        try {
++            if (!ensureInitialized(account)) {
++                return new long[]{0, 0, 0};
++            }
++            PreservedRefDao dao = AliGramData.refDao();
++            PreservedBlobDao blobDao = AliGramData.blobDao();
++            if (dao == null || blobDao == null) {
++                return new long[]{0, 0, 0};
++            }
++            List<PreservedRef> refs = dao.getRefsForDialog(ownUserId(account), dialogId);
++            long blobs = 0;
++            long bytes = 0;
++            HashSet<String> seen = new HashSet<>();
++            for (PreservedRef ref : refs) {
++                if (ref.blobId == null || !seen.add(ref.blobId)) {
++                    continue;
++                }
++                PreservedBlob blob = blobDao.getById(ref.blobId);
++                if (blob != null) {
++                    blobs++;
++                    bytes += blob.size;
++                }
++            }
++            return new long[]{refs.size(), blobs, bytes};
++        } catch (Throwable e) {
++            return new long[]{0, 0, 0};
++        }
++    }
++
+     /** Explicit per-chat clear: refs deleted, refcount-0 blobs deleted. */
+     public static void clearPreservedForDialog(int account, long dialogId) {
+         try {
+@@ -2590,6 +2694,7 @@ public final class AliGramPreservation {
+                         if (deferredDao != null) {
+                             deferredDao.deleteForAccount(account);
+                         }
++                        sweepUnreferencedBlobs();
+                         // Delete the blob subtree (files first, then dirs).
+                         File blobDir = AliGramFileCopy.getBlobDir(account);
+                         deleteDirectoryRecursive(blobDir);
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
+index 26153f712..38bedceb0 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
+@@ -40,6 +40,12 @@ public interface PreservedBlobDao {
+     @Query("SELECT * FROM PreservedBlob WHERE refCount <= 0")
+     List<PreservedBlob> getOrphanBlobs();
+ 
++    /** Blobs no live PreservedRef points at (recomputed from the refs
++     * table, ignoring the stored refCount — which a purge/clear leaves
++     * stale). Used after purge/clear to drop orphaned rows promptly. */
++    @Query("SELECT * FROM PreservedBlob WHERE blobId NOT IN (SELECT DISTINCT blobId FROM PreservedRef WHERE blobId IS NOT NULL)")
++    List<PreservedBlob> getUnreferencedBlobs();
++
+     @Query("DELETE FROM PreservedBlob WHERE blobId = :blobId")
+     void deleteById(String blobId);
+ 
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+index 178dbee81..832288b6d 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+@@ -71,6 +71,9 @@ public interface PreservedRefDao {
+     @Query("SELECT COALESCE(MAX(revisionSeq), 0) FROM PreservedRef WHERE userId = :userId AND dialogId = :dialogId AND messageId = :messageId AND role = 'EDIT'")
+     int getMaxEditRevisionSeq(long userId, long dialogId, int messageId);
+ 
++    @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId")
++    List<PreservedRef> getRefsForAccount(int accountId);
++
+     @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId AND state IN ('ENQUEUED', 'DOWNLOADING', 'COPYING', 'PINNED')")
+     List<PreservedRef> getActiveRefsForAccount(int accountId);
+ 
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuMessageHistory.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuMessageHistory.java
+index a3aae623c..1c1d995b9 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuMessageHistory.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuMessageHistory.java
+@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.RecyclerView;
+ 
+ import com.radolyn.ayugram.AyuConstants;
+ import com.radolyn.ayugram.AyuUtils;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.database.entities.EditedMessage;
+ import com.radolyn.ayugram.messages.AyuMessagesController;
+ import com.radolyn.ayugram.proprietary.AyuMessageUtils;
+@@ -720,7 +721,21 @@ public class AyuMessageHistory extends NekoDelegateFragment {
+         }
+         // prefer the current message's cached media only if the original file still exists
+         boolean localFileFound = false;
+-        if (messageObject.isVoice()) {
++        // --- AliGram hook (H-R): prefer the preserved blob copy for this
++        // revision over the live message's media and over the public
++        // attachments dir. UI-safe: in-memory map lookup only, never a
++        // DAO call from the render path.
++        File preservedFile = AliGramPreservation.resolvePreservedFileForRevision(currentAccount, editedMessage.fakeId);
++        if (preservedFile != null) {
++            if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_FILE) {
++                updateDocumentMediaWithLocalFile(msg, preservedFile, editedMessage);
++            } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_STORY) {
++                updateStoryMediaWithLocalFile(msg, preservedFile);
++            } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_PHOTO) {
++                updatePhotoMediaWithLocalFile(msg, preservedFile);
++            }
++            localFileFound = true;
++        } else if (messageObject.isVoice()) {
+             msg.media = messageObject.messageOwner.media;
+         } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_FILE) {
+             File originalPath = FileLoader.getInstance(currentAccount).getPathToMessage(messageObject.messageOwner);
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuViewDeleted.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuViewDeleted.java
+index 1f266502c..9a25a2ea2 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuViewDeleted.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/ui/AyuViewDeleted.java
+@@ -33,9 +33,11 @@ import androidx.recyclerview.widget.LinearLayoutManager;
+ import androidx.recyclerview.widget.RecyclerView;
+ 
+ import com.radolyn.ayugram.AyuConstants;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.database.entities.DeletedMessageFull;
+ import com.radolyn.ayugram.messages.AyuMessagesController;
+ import com.radolyn.ayugram.proprietary.AyuMessageUtils;
++import com.radolyn.ayugram.utils.AyuFileLocation;
+ 
+ import org.telegram.messenger.AndroidUtilities;
+ import org.telegram.messenger.DialogObject;
+@@ -1262,6 +1264,29 @@ public class AyuViewDeleted extends NekoDelegateFragment {
+         }
+ 
+         tl.ayuDeleted = true;
++        // --- AliGram hook (H-R): play the deleted message from its
++        // preserved blob copy when one exists. The server copy may be
++        // unreferenceable after deletion (R-07); the legacy public-dir
++        // copy is used when no blob exists. UI-safe: map lookup only.
++        try {
++            File preservedFile = AliGramPreservation.resolvePreservedFileForRevision(currentAccount, base.fakeId);
++            if (preservedFile == null) {
++                preservedFile = AliGramPreservation.resolvePreservedFileForMessage(currentAccount, base.dialogId, base.messageId);
++            }
++            if (preservedFile != null) {
++                tl.attachPath = preservedFile.getAbsolutePath();
++                if (tl.media instanceof TLRPC.TL_messageMediaDocument && tl.media.document != null) {
++                    tl.media.document.localPath = preservedFile.getAbsolutePath();
++                } else if (tl.media instanceof TLRPC.TL_messageMediaPhoto && tl.media.photo != null) {
++                    TLRPC.PhotoSize largest = FileLoader.getClosestPhotoSizeWithSize(tl.media.photo.sizes, AndroidUtilities.getPhotoSize());
++                    if (largest != null) {
++                        largest.location = new AyuFileLocation(preservedFile.getAbsolutePath());
++                    }
++                }
++            }
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
+         return new MessageObject(getCurrentAccount(), tl, false, true);
+     }
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index 01b8b6c71..c6f83027f 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -138,6 +138,8 @@ import com.google.zxing.common.detector.MathUtils;
+ 
+ import com.radolyn.ayugram.AyuConstants;
+ import com.radolyn.ayugram.AyuUtils;
++import com.radolyn.ayugram.aligram.AliGramEligibility;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.database.AyuData;
+ import com.radolyn.ayugram.messages.AyuMessagesController;
+ import com.radolyn.ayugram.messages.AyuSavePreferences;
+@@ -483,6 +485,7 @@ public class ChatActivity extends BaseFragment implements
+     private final static int nkbtn_report = 2041;
+     private final static int nkbtn_clearDeleted = 2100;
+     private final static int nkbtn_viewDeleted = 2101;
++    private final static int nkbtn_aligram_preserve = 2102;
+ 
+     public int shareAlertDebugMode = DEBUG_SHARE_ALERT_MODE_NORMAL;
+     public boolean shareAlertDebugTopicsSlowMotion;
+@@ -4918,6 +4921,8 @@ public class ChatActivity extends BaseFragment implements
+             }
+             hideTitleItem = NaConfig.INSTANCE.getChatMenuItemHideTitle().Bool() ? headerItem.lazilyAddSubItem(nkheaderbtn_hide_title, R.drawable.hide_title, getString(R.string.HideTitle)) : null;
+             if (NaConfig.INSTANCE.getChatMenuItemViewDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_viewDeleted, R.drawable.msg_view_file, getString(R.string.ViewDeleted));
++            // --- AliGram: per-chat media preservation toggle (groups/channels only).
++            if (currentChat != null) headerItem.lazilyAddSubItem(nkbtn_aligram_preserve, R.drawable.msg_saved_solar, getString(R.string.AliGramPreserveMedia));
+             if (NaConfig.INSTANCE.getChatMenuItemClearDeleted().Bool() && NaConfig.INSTANCE.getEnableSaveDeletedMessages().Bool()) headerItem.lazilyAddSubItem(nkbtn_clearDeleted, R.drawable.msg_clear, getString(R.string.ClearDeleted));
+             if (!isTopic) {
+                 if (NaConfig.INSTANCE.getChatMenuItemDeleteOwnMessages().Bool() && (ChatObject.isMegagroup(currentChat) || currentChat != null && !ChatObject.isChannel(currentChat))) {
+@@ -46256,6 +46261,8 @@ public class ChatActivity extends BaseFragment implements
+             }
+         } else if (id == nkbtn_viewDeleted) {
+             presentFragment(new AyuViewDeleted(dialog_id));
++        } else if (id == nkbtn_aligram_preserve) {
++            showAliGramPreservationDialog();
+         } else if (id == nkbtn_bookmarks_manager) {
+             presentFragment(new BookmarksActivity(dialog_id));
+         } else if (id == nkheaderbtn_upgrade) {
+@@ -46350,6 +46357,61 @@ public class ChatActivity extends BaseFragment implements
+         }
+     }
+ 
++    // --- AliGram: per-chat media preservation toggle dialog. Stats are
++    // loaded on a background thread (Room queries), then the dialog is
++    // shown on the UI thread.
++    private void showAliGramPreservationDialog() {
++        if (getParentActivity() == null) {
++            return;
++        }
++        final long did = dialog_id;
++        final int account = currentAccount;
++        Utilities.globalQueue.postRunnable(() -> {
++            final long[] stats = AliGramPreservation.getPreservedStatsForDialog(account, did);
++            AndroidUtilities.runOnUIThread(() -> showAliGramPreservationDialogInternal(did, stats));
++        });
++    }
++
++    private void showAliGramPreservationDialogInternal(long did, long[] stats) {
++        if (getParentActivity() == null) {
++            return;
++        }
++        final int account = currentAccount;
++        boolean enabled = AliGramPreservation.isOptedIn(account, did);
++        AliGramPreservation.Activation act = AliGramPreservation.getActivation(account, did);
++        StringBuilder message = new StringBuilder();
++        message.append(getString(enabled ? R.string.AliGramPreservationEnabled : R.string.AliGramPreservationDisabled));
++        if (enabled && act.state == AliGramEligibility.ActivationState.PENDING) {
++            message.append("\n\n").append(getString(R.string.AliGramPreservationPending));
++        }
++        if (stats != null && stats[0] > 0) {
++            message.append("\n\n").append(LocaleController.formatString(R.string.AliGramPreservationStats, stats[0], AndroidUtilities.formatFileSize(stats[2])));
++        }
++        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
++        builder.setTitle(getString(R.string.AliGramPreservationTitle));
++        builder.setMessage(message.toString());
++        builder.setPositiveButton(getString(enabled ? R.string.AliGramPreservationDisable : R.string.AliGramPreservationEnable), (dialogInterface, i) -> {
++            boolean nowEnabled = AliGramPreservation.togglePreservation(account, did);
++            BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(nowEnabled ? R.string.AliGramPreservationEnabledToast : R.string.AliGramPreservationDisabledToast)).show();
++        });
++        builder.setNeutralButton(getString(R.string.AliGramPreservationClear), (dialogInterface, i) -> {
++            AlertDialog.Builder confirm = new AlertDialog.Builder(getParentActivity());
++            confirm.setTitle(getString(R.string.AliGramPreservationTitle));
++            confirm.setMessage(getString(R.string.AliGramPreservationClearConfirm));
++            confirm.setPositiveButton(getString(R.string.Clear), (d, which) -> {
++                Utilities.globalQueue.postRunnable(() -> {
++                    AliGramPreservation.clearPreservedForDialog(account, did);
++                    AndroidUtilities.runOnUIThread(() -> BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show());
++                });
++            });
++            confirm.setNegativeButton(getString(R.string.Cancel), null);
++            confirm.makeRed(AlertDialog.BUTTON_POSITIVE);
++            showDialog(confirm.create());
++        });
++        builder.setNegativeButton(getString(R.string.Cancel), null);
++        showDialog(builder.create());
++    }
++
+     private void nkbtn_onclick(int id) {
+         // from "items"
+         createUndoView();
+diff --git a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoAboutActivity.java b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoAboutActivity.java
+index 06e7d02de..a7864ef6f 100644
+--- a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoAboutActivity.java
++++ b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoAboutActivity.java
+@@ -11,12 +11,14 @@ import androidx.recyclerview.widget.RecyclerView;
+ import org.telegram.messenger.MessagesController;
+ import org.telegram.messenger.R;
+ import org.telegram.messenger.browser.Browser;
++import org.telegram.ui.ActionBar.AlertDialog;
+ import org.telegram.ui.Cells.TextSettingsCell;
+ 
+ import tw.nekomimi.nekogram.DatacenterActivity;
+ 
+ public class NekoAboutActivity extends BaseNekoSettingsActivity {
+ 
++    private int aligramAboutRow;
+     private int xChannelRow;
+     private int channelRow;
+     private int channelTipsRow;
+@@ -28,6 +30,7 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
+     protected void updateRows() {
+         super.updateRows();
+ 
++        aligramAboutRow = addRow();
+         xChannelRow = addRow();
+         channelRow = addRow();
+         channelTipsRow = addRow();
+@@ -43,7 +46,14 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
+ 
+     @Override
+     protected void onItemClick(View view, int position, float x, float y) {
+-        if (position == xChannelRow) {
++        if (position == aligramAboutRow) {
++            // --- AliGram: app identity, based-on statement and GPL notice.
++            new AlertDialog.Builder(getParentActivity())
++                    .setTitle(getString(R.string.AliGramAboutTitle))
++                    .setMessage(getString(R.string.AliGramAboutText))
++                    .setPositiveButton(getString(R.string.OK), null)
++                    .show();
++        } else if (position == xChannelRow) {
+             MessagesController.getInstance(currentAccount).openByUserName("NagramX", NekoAboutActivity.this, 1);
+         } else if (position == channelRow) {
+             MessagesController.getInstance(currentAccount).openByUserName("nagram_channel", NekoAboutActivity.this, 1);
+@@ -73,7 +83,9 @@ public class NekoAboutActivity extends BaseNekoSettingsActivity {
+         public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position, boolean partial) {
+             if (holder.getItemViewType() == TYPE_SETTINGS) {
+                 TextSettingsCell textCell = (TextSettingsCell) holder.itemView;
+-                if (position == xChannelRow) {
++                if (position == aligramAboutRow) {
++                    textCell.setTextAndValue(getString(R.string.AliGramAboutTitle), getString(R.string.AliGramPreservationTitle), true);
++                } else if (position == xChannelRow) {
+                     textCell.setTextAndValue(getString(R.string.XChannel), "@NagramX", true);
+                 } else if (position == channelRow) {
+                     textCell.setTextAndValue(getString(R.string.OfficialChannel), "@nagram_channel", true);
+diff --git a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
+index 8893a2a1d..06bb08272 100644
+--- a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
++++ b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
+@@ -19,6 +19,7 @@ import androidx.annotation.NonNull;
+ import androidx.recyclerview.widget.RecyclerView;
+ 
+ import com.radolyn.ayugram.AyuConstants;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.database.AyuData;
+ import com.radolyn.ayugram.messages.AyuMessagesController;
+ 
+@@ -167,6 +168,27 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity
+             .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
+             .makeRed(AlertDialog.BUTTON_POSITIVE)
+             .show()));
++    // --- AliGram: preserved-media storage (per-chat opt-ins stay enabled;
++    // only the stored copies are deleted).
++    private final AbstractConfigCell clearPreservedMediaRow = cellGroup.appendCell(new ConfigCellTextCheckIcon(null, "AliGramPreservedStorage", null, "...", R.drawable.msg_clear, false, () -> new AlertDialog.Builder(getContext(), getResourceProvider())
++            .setTitle(getString(R.string.AliGramPreservedStorage))
++            .setMessage(getString(R.string.AliGramPreservedStorageAbout) + "\n\n" + getString(R.string.AliGramClearPreservedConfirm))
++            .setPositiveButton(getString(R.string.Clear), (dialog, which) -> {
++                AlertDialog progressDialog = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
++                progressDialog.setCanCancel(false);
++                progressDialog.show();
++                Utilities.globalQueue.postRunnable(() -> {
++                    AliGramPreservation.clearPreservedStorage(currentAccount);
++                    AndroidUtilities.runOnUIThread(() -> {
++                        progressDialog.dismiss();
++                        BulletinFactory.of(this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show();
++                    });
++                    loadAliGramPreservedSize();
++                });
++            })
++            .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
++            .makeRed(AlertDialog.BUTTON_POSITIVE)
++            .show()));
+     private final AbstractConfigCell dividerAyuMoments = cellGroup.appendCell(new ConfigCellDivider());
+ 
+     // N-Config
+@@ -216,6 +238,7 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity
+     public boolean onFragmentCreate() {
+         super.onFragmentCreate();
+         AyuData.loadSizes(this);
++        loadAliGramPreservedSize();
+         return true;
+     }
+ 
+@@ -567,6 +590,21 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity
+         }
+     }
+ 
++    private void loadAliGramPreservedSize() {
++        Utilities.globalQueue.postRunnable(() -> {
++            long[] stats = AliGramPreservation.getPreservedStats(currentAccount);
++            AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(stats), 500);
++        });
++    }
++
++    public void refreshAliGramPreservedSize(long[] stats) {
++        if (listAdapter != null) {
++            String value = stats[0] + " · " + AndroidUtilities.formatFileSize(stats[2]);
++            ((ConfigCellTextCheckIcon) clearPreservedMediaRow).setValue(value);
++            listAdapter.notifyItemChanged(cellGroup.rows.indexOf(clearPreservedMediaRow));
++        }
++    }
++
+     private void exportAyuDB() {
+         if (getParentActivity() == null) return;
+         AlertDialog progressDialog = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
+diff --git a/TMessagesProj/src/main/res/values/strings_nax.xml b/TMessagesProj/src/main/res/values/strings_nax.xml
+index 5d29ffb93..b2f8d4eae 100644
+--- a/TMessagesProj/src/main/res/values/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values/strings_nax.xml
+@@ -285,6 +285,24 @@
+     <string name="FixLinkPreview">Fix Link Preview</string>
+     <string name="NoQuoteForwardShort">NoQuote</string>
+     <string name="ViewDeleted">View Deleted</string>
++    <string name="AliGramPreserveMedia">Preserve media</string>
++    <string name="AliGramPreservationTitle">AliGram media preservation</string>
++    <string name="AliGramPreservationEnabled">Preservation is ON for this chat. New media received from now on is downloaded and kept in private storage, so it survives deletion or edits.</string>
++    <string name="AliGramPreservationDisabled">Preservation is OFF for this chat. New media is not downloaded or kept.</string>
++    <string name="AliGramPreservationPending">Activation pending: will start when Telegram reconnects and completes a server sync.</string>
++    <string name="AliGramPreservationStats">%1$d preserved items, %2$s stored in this chat</string>
++    <string name="AliGramPreservationEnable">Enable preservation</string>
++    <string name="AliGramPreservationDisable">Disable preservation</string>
++    <string name="AliGramPreservationClear">Clear preserved media</string>
++    <string name="AliGramPreservationClearConfirm">Delete all media preserved by AliGram in this chat? Preservation stays enabled and will keep preserving new media.</string>
++    <string name="AliGramPreservedCleared">Preserved media cleared</string>
++    <string name="AliGramPreservationEnabledToast">Media preservation enabled for this chat</string>
++    <string name="AliGramPreservationDisabledToast">Media preservation disabled for this chat</string>
++    <string name="AliGramPreservedStorage">AliGram preserved media</string>
++    <string name="AliGramAboutTitle">AliGram</string>
++    <string name="AliGramAboutText">AliGram is a modified Telegram client based on NagramX.\n\nMedia preservation: in selected groups and channels, new media is downloaded when it arrives and kept in private storage, so it survives deletion or edits.\n\nAliGram is free software licensed under the GNU General Public License v3. Upstream source and attribution are preserved in the project repository.</string>
++    <string name="AliGramClearPreservedConfirm">Delete all media preserved by AliGram? Per-chat preservation stays enabled and will keep preserving new media.</string>
++    <string name="AliGramPreservedStorageAbout">Media from selected groups and channels is downloaded when received and kept in private storage, so it survives deletion or edits.</string>
+     <string name="PasskeyLogin">Passkey Login</string>
+     <string name="PasskeyInfo2">This feature only works with password managers that allow the user to manage trust settings for privileged apps, such as **Bitwarden** and **KeePassDX**.</string>
+     <string name="PasskeyUnsupportedTitle">Unsupported password manager</string>
+-- 
+2.43.0
+

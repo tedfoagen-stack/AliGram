@@ -1,0 +1,148 @@
+From f9c2e181359cfbb42b72c8f75ea3f228f5acfdc3 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:10:26 +0300
+Subject: [PATCH 53/67] =?UTF-8?q?feat(aligram):=20hidden=20folders=20?=
+ =?UTF-8?q?=E2=80=94=20filter=20hidden=20dialogs=20in=20sortDialogs,=20hid?=
+ =?UTF-8?q?den-dialog=20cache=20provider,=20prune=20orphans?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../messenger/MessagesController.java         | 78 ++++++++++++++++++-
+ 1 file changed, 76 insertions(+), 2 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+index df75be449..c29e36621 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+@@ -139,6 +139,7 @@ import java.util.stream.Collectors;
+ 
+ import me.vkryl.core.BitwiseUtils;
+ 
++import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+ import com.radolyn.ayugram.aligram.AliGramPreservation;
+ 
+ import tw.nekomimi.nekogram.NekoConfig;
+@@ -442,6 +443,60 @@ public class MessagesController extends BaseController implements NotificationCe
+         return dialogFilters;
+     }
+ 
++    // --- AliGram hidden folders: display-layer filtering only. The hidden
++    // dialog cache lives in AliGramHiddenFolders and is keyed by server
++    // filter id; the provider below rebuilds it from DialogFilter
++    // membership (includesDialog over allDialogs) — never from
++    // filter.dialogs, which sortDialogs() itself filters while locked.
++    private boolean aliGramHiddenFiltersExist;
++    private int aliGramHiddenAllDialogsSize = -1;
++
++    /** Never hide Saved Messages (self) or the Replies pseudo-dialog. */
++    public boolean aliGramIsHidden(long dialogId) {
++        if (dialogId == getUserConfig().getClientUserId() || UserObject.isReplyUser(dialogId)) {
++            return false;
++        }
++        return AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId);
++    }
++
++    /**
++     * (Re)registers the hidden-dialog membership provider, prunes hidden
++     * flags for filters that no longer exist, and rebuilds the cache.
++     * Called when filters load/change and on every lock/unlock/hide/unhide
++     * transition (via the UI refresh helper); sortDialogs() also calls it
++     * when the dialog count changed, so dialogs that arrive later and match
++     * a hidden filter are hidden without waiting for a filter event.
++     */
++    public void refreshAliGramHiddenFolders() {
++        ArrayList<Integer> existingIds = new ArrayList<>();
++        for (int i = 0, n = dialogFilters.size(); i < n; i++) {
++            existingIds.add(dialogFilters.get(i).id);
++        }
++        AliGramHiddenFolders.pruneHiddenFilters(currentAccount, existingIds);
++        AliGramHiddenFolders.setDialogsProvider(currentAccount, filterId -> {
++            ArrayList<Long> out = new ArrayList<>();
++            DialogFilter filter = null;
++            for (int i = 0, n = dialogFilters.size(); i < n; i++) {
++                if (dialogFilters.get(i).id == filterId) {
++                    filter = dialogFilters.get(i);
++                    break;
++                }
++            }
++            if (filter == null) {
++                return out;
++            }
++            for (int i = 0, n = allDialogs.size(); i < n; i++) {
++                TLRPC.Dialog d = allDialogs.get(i);
++                if (d != null && filter.includesDialog(getAccountInstance(), d.id, d)) {
++                    out.add(d.id);
++                }
++            }
++            return out;
++        });
++        aliGramHiddenFiltersExist = !AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty();
++        aliGramHiddenAllDialogsSize = allDialogs.size();
++    }
++
+     private final CacheFetcher<Integer, TLRPC.TL_help_appConfig> appConfigFetcher = new CacheFetcher<Integer, TLRPC.TL_help_appConfig>() {
+         @Override
+         protected void getRemote(int currentAccount, Integer arguments, long hash, Utilities.Callback4<Boolean, TLRPC.TL_help_appConfig, Long, Boolean> onResult) {
+@@ -2442,6 +2497,10 @@ public class MessagesController extends BaseController implements NotificationCe
+ 
+                 lockFiltersInternal();
+ 
++                // AliGram hidden folders: filters (re)loaded — prune orphan
++                // flags and rebuild the hidden-dialog cache.
++                refreshAliGramHiddenFolders();
++
+                 if (onDone != null) {
+                     onDone.run();
+                 }
+@@ -2576,6 +2635,9 @@ public class MessagesController extends BaseController implements NotificationCe
+     }
+ 
+     public void onFilterUpdate(DialogFilter filter) {
++        // AliGram hidden folders: a filter changed — rebuild the cache
++        // before sortDialogs() re-reads it.
++        refreshAliGramHiddenFolders();
+         for (int a = 0; a < 2; a++) {
+             if (selectedDialogFilter[a] == filter) {
+                 sortDialogs(null);
+@@ -22427,7 +22489,9 @@ public class MessagesController extends BaseController implements NotificationCe
+                         dialogId = encryptedChat.user_id;
+                     }
+                 }
+-                if (filter.includesDialog(getAccountInstance(), dialogId, d)) {
++                // AliGram hidden folders: same display-layer skip as in
++                // sortDialogs() (see above).
++                if (filter.includesDialog(getAccountInstance(), dialogId, d) && !aliGramIsHidden(dialogId)) {
+                     if (canAddToForward(d)) {
+                         dialogsForward.add(d);
+                     }
+@@ -22583,6 +22647,12 @@ public class MessagesController extends BaseController implements NotificationCe
+         if (chatsDict == null && ApplicationLoader.mainInterfacePaused) {
+             return;
+         }
++        // AliGram hidden folders: dialogs arrived/left since the last
++        // rebuild — refresh the cache (cheap size check; the rebuild itself
++        // only runs when hidden filters exist and the count changed).
++        if (aliGramHiddenFiltersExist && allDialogs.size() != aliGramHiddenAllDialogsSize) {
++            refreshAliGramHiddenFolders();
++        }
+         dialogsServerOnly.clear();
+         dialogsCanAddUsers.clear();
+         dialogsMyGroups.clear();
+@@ -22641,7 +22711,11 @@ public class MessagesController extends BaseController implements NotificationCe
+                                 dialogId = encryptedChat.user_id;
+                             }
+                         }
+-                        if (sortingDialogFilter.includesDialog(getAccountInstance(), dialogId, d)) {
++                        // AliGram hidden folders: display-layer only — a
++                        // dialog in a hidden filter stays out of the
++                        // filter's list (and forward list) while locked.
++                        // Never mutates dialogs_dict / allDialogs.
++                        if (sortingDialogFilter.includesDialog(getAccountInstance(), dialogId, d) && !aliGramIsHidden(dialogId)) {
+                             if (canAddToForward(d)) {
+                                 dialogsForward.add(d);
+                             }
+-- 
+2.43.0
+

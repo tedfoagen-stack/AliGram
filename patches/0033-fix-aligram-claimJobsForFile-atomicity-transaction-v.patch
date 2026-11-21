@@ -1,0 +1,218 @@
+From 2d2c83acb8d8e9cc0175f9ce46372d913e292962 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:50:19 +0000
+Subject: [PATCH 33/67] =?UTF-8?q?fix(aligram):=20claimJobsForFile=20atomic?=
+ =?UTF-8?q?ity=20=E2=80=94=20transaction=20via=20caller=20runInTransaction?=
+ =?UTF-8?q?=20(Phase=203.2)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Run 43633746250 proved Room 2.8.4 ignores @Transaction on DAO
+default methods: scenario 12 failed with the first UPDATE committed
+in autocommit (ComparisonFailure at the rollback assertion), while
+scenarios 11 and 13 passed — the exact signature of 'annotation
+ignored'. The fix:
+- PreservedRefDao: @Transaction removed from the default method
+  (misleading); new static helper claimJobsInTransaction(db, ...)
+  provides the transaction via db.runInTransaction — the ONLY way
+  to call the claim. nextRevisionSeq shares the pattern but is
+  read-only (single SELECT, no writes), so it needs no fix.
+- AliGramPreservation.onFileLoadedInternal (the single production
+  call site): claims through the helper.
+- Scenarios 11/12/13 now call the helper (the production path);
+  scenario 12's comment records that its original bare form is
+  what failed on run 43633746250. Scenario 5(b) was already correct
+  (claim nested in an outer runInTransaction); its comment fixed.
+---
+ .../ayugram/aligram/AliGramPreservation.java  |  9 +++-
+ .../ayugram/aligram/PreservedRefDao.java      | 24 +++++++--
+ .../aligram/AliGramRoomIntegrationTest.java   | 51 +++++++++++--------
+ 3 files changed, 60 insertions(+), 24 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 5e5176242..115765e7c 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -885,7 +885,14 @@ public final class AliGramPreservation {
+             if (dao == null) {
+                 return;
+             }
+-            List<PreservedRef> claimed = dao.claimJobsForFile(account, fileName);
++            AliGramDatabase db = AliGramData.getDatabase();
++            if (db == null) {
++                return; // cannot claim without the database handle
++            }
++            // Phase 3.2 (§11.6): the claim must run in one transaction —
++            // Room ignores @Transaction on the DAO default method, so the
++            // transaction is provided by PreservedRefDao.claimJobsInTransaction.
++            List<PreservedRef> claimed = PreservedRefDao.claimJobsInTransaction(db, account, fileName);
+             if (claimed == null || claimed.isEmpty()) {
+                 return; // lookup-only: no waiting job ⇒ no-op
+             }
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+index 7d686c44c..084efa11a 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+@@ -118,10 +118,15 @@ public interface PreservedRefDao {
+ 
+     /**
+      * Fan-out claim (Phase 2.2 §1.7): move every waiting row for one file to
+-     * COPYING in a single transaction; the caller then copies once and binds
+-     * per job. A second delivery finds no waiting rows and is a no-op.
++     * COPYING; the caller then copies once and binds per job. A second delivery finds no waiting rows and is a no-op.
++     *
++     * <p>NOT transactional by itself: Room 2.8.4 ignores {@code @Transaction}
++     * on DAO {@code default} methods — proven by scenario 12 (Phase 3.2):
++     * the standalone claim's first UPDATE committed in autocommit and the
++     * rollback assertion failed. Callers MUST use
++     * {@link #claimJobsInTransaction} — never call this method directly
++     * outside a {@code runInTransaction} block.
+      */
+-    @Transaction
+     default List<PreservedRef> claimJobsForFile(int accountId, String expectedFileName) {
+         List<PreservedRef> jobs = getWaitingJobsForFile(accountId, expectedFileName);
+         for (PreservedRef job : jobs) {
+@@ -132,6 +137,19 @@ public interface PreservedRefDao {
+         return jobs;
+     }
+ 
++    /**
++     * Transactional fan-out claim — the ONLY way to call
++     * {@link #claimJobsForFile}.
++     *
++     * <p>The transaction is provided here, by the caller, via
++     * {@code runInTransaction}, because the {@code @Transaction}
++     * annotation on the {@code default} method is ignored by Room
++     * (see above). Every caller must go through this helper.
++     */
++    static List<PreservedRef> claimJobsInTransaction(AliGramDatabase db, int accountId, String expectedFileName) {
++        return db.runInTransaction(() -> db.preservedRefDao().claimJobsForFile(accountId, expectedFileName));
++    }
++
+     /** Next EDIT revisionSeq for a message, assigned in one transaction. */
+     @Transaction
+     default int nextRevisionSeq(long userId, long dialogId, int messageId) {
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+index 14929221b..c49f9f727 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+@@ -532,7 +532,10 @@ public class AliGramRoomIntegrationTest {
+         try {
+             onDb(() -> {
+                 db.runInTransaction(() -> {
+-                    // Claim (a @Transaction DAO method, nested here).
++                    // Claim nested inside the outer runInTransaction —
++                    // the outer transaction is what provides the
++                    // atomicity (the @Transaction annotation on the DAO
++                    // default method is ignored by Room; Phase 3.2).
+                     db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4");
+                     db.preservedBlobDao().incrementRefCount(BLOB_DOC);
+                     // Duplicate of the existing message-11 LIVE row.
+@@ -1012,7 +1015,9 @@ public class AliGramRoomIntegrationTest {
+     // N threads claim the same file at the same time behind a start
+     // gate. Exactly one caller must win each waiting job: the union of
+     // all returned lists must be exactly the seeded set, with no
+-    // duplicate refId anywhere. The claim call is retried on a
++    // duplicate refId anywhere. The claim goes through the transactional
++    // helper (the production path — see scenario 12). The claim call is
++    // retried on a
+     // transient SQLite busy/locked failure (same bounded-retry pattern
+     // as scenario 4): Robolectric's shadow SQLite throws SQLITE_BUSY
+     // under thread contention, and that contention mode is NOT the
+@@ -1057,8 +1062,9 @@ public class AliGramRoomIntegrationTest {
+                             RuntimeException lastBusy = null;
+                             for (int attempt = 0; attempt < 30; attempt++) {
+                                 try {
+-                                    claimed = db.preservedRefDao()
+-                                            .claimJobsForFile(ACCOUNT_0, fileName);
++                                    // Production path: the claim runs inside
++                                    // the transactional helper, never bare.
++                                    claimed = PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, fileName);
+                                     lastBusy = null;
+                                     break;
+                                 } catch (RuntimeException e) {
+@@ -1204,18 +1210,22 @@ public class AliGramRoomIntegrationTest {
+     // Scenario 12 — a mid-claim failure rolls back the claim itself,
+     // with NO outer transaction.
+     //
+-    // This is the test scenario 5(b) is NOT: the claim runs standalone,
+-    // so only its own @Transaction can save it. Fault injection without
++    // This is the test scenario 5(b) is NOT: the claim runs standalone
++    // through the transactional helper (the production path), so only
++    // the runInTransaction wrapper can save it. Fault injection without
+     // touching production code: a BEFORE UPDATE trigger aborts the
+     // SECOND COPYING update of the fixture (the WHEN clause counts the
+     // COPYING rows already written on this connection: 0 before the
+     // first update, 1 before the second). The abort must propagate out
+     // of claimJobsForFile, and BOTH rows must still be ENQUEUED
+-    // afterwards. If @Transaction is ignored for the default method,
++    // afterwards. If the helper's transaction did not wrap the claim,
+     // the first UPDATE has already committed (autocommit) and the first
+     // row stays COPYING — the test fails with exactly that diagnosis.
+-    // The trigger lives only on this test's fresh in-memory DB and is
+-    // dropped in the finally block.
++    // (The original form of this test — calling the DAO method bare —
++    // failed exactly that way on run 43633746250, proving Room ignores
++    // @Transaction on DAO default methods; that is why the helper
++    // exists. The trigger lives only on this test's fresh in-memory DB
++    // and is dropped in the finally block.)
+     // ------------------------------------------------------------------
+ 
+     @Test
+@@ -1238,12 +1248,14 @@ public class AliGramRoomIntegrationTest {
+                 return null;
+             });
+ 
+-            // Standalone claim — deliberately NOT wrapped in
+-            // db.runInTransaction (that is what scenario 5(b) did, and
+-            // it is why 5(b) cannot prove this).
++            // Standalone claim through the transactional helper —
++            // deliberately NOT wrapped in db.runInTransaction here
++            // (that is what scenario 5(b) did, and it is why 5(b)
++            // cannot prove this); the helper itself provides the
++            // transaction, exactly as the production call site does.
+             AtomicReference<Throwable> thrown = new AtomicReference<>();
+             try {
+-                onDb(() -> db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
++                onDb(() -> PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4"));
+                 fail("claim must throw when its second COPYING update aborts");
+             } catch (ExecutionException e) {
+                 thrown.set(e.getCause());
+@@ -1255,11 +1267,10 @@ public class AliGramRoomIntegrationTest {
+                             || (thrown.get().getMessage() != null
+                             && thrown.get().getMessage().contains("aligram-test")));
+ 
+-            // Rollback assertion: with a real @Transaction wrapper both
+-            // rows are ENQUEUED again; without one the first row is
+-            // COPYING (its UPDATE committed in autocommit).
+-            assertEquals("first claimed row was NOT rolled back: @Transaction is not "
+-                    + "in effect for the claimJobsForFile default method",
++            // Rollback assertion: with the helper's runInTransaction
++            // wrapper both rows are ENQUEUED again; without one the
++            // first row is COPYING (its UPDATE committed in autocommit).
++            assertEquals("first claimed row was NOT rolled back: the helper's transaction did not wrap the claim",
+                     AliGramEligibility.STATE_ENQUEUED,
+                     onDb(() -> db.preservedRefDao().getRefById(waiting1)).state);
+             assertEquals(AliGramEligibility.STATE_ENQUEUED,
+@@ -1296,7 +1307,7 @@ public class AliGramRoomIntegrationTest {
+     public void scenario13_sequentialDoubleClaimIsNoop() throws Exception {
+         final long[] ids = seedClaimJobs("shared.mp4");
+         List<PreservedRef> first = onDb(() ->
+-                db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
++                PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4"));
+         assertEquals(3, first.size());
+         assertEquals(AliGramEligibility.STATE_COPYING,
+                 onDb(() -> db.preservedRefDao().getRefById(ids[0])).state);
+@@ -1305,7 +1316,7 @@ public class AliGramRoomIntegrationTest {
+         assertEquals(AliGramEligibility.STATE_COPYING,
+                 onDb(() -> db.preservedRefDao().getRefById(ids[2])).state);
+         List<PreservedRef> second = onDb(() ->
+-                db.preservedRefDao().claimJobsForFile(ACCOUNT_0, "shared.mp4"));
++                PreservedRefDao.claimJobsInTransaction(db, ACCOUNT_0, "shared.mp4"));
+         assertTrue("second claim must find no waiting rows", second.isEmpty());
+         cleanupClaimJobs(ids);
+     }
+-- 
+2.43.0
+

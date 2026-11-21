@@ -1,0 +1,91 @@
+From 8edf4ef562fca8c8d37ee5d656ae1787ed4edcd3 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 17:18:58 +0300
+Subject: [PATCH 49/67] ci(aligram): sign debug APK with AliGram release key
+ from CI secrets, verify fingerprint + versionCode 1261
+
+---
+ .github/workflows/aligram-build.yml | 48 +++++++++++++++++++++++++++--
+ 1 file changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/aligram-build.yml b/.github/workflows/aligram-build.yml
+index 5c53c0302..dc23dea30 100644
+--- a/.github/workflows/aligram-build.yml
++++ b/.github/workflows/aligram-build.yml
+@@ -81,27 +81,71 @@ jobs:
+           assert pkg == "app.aligram", "unexpected package_name: %r" % (pkg,)
+           print("OK: google-services.json is valid JSON with a single app.aligram client.")
+           EOF
++      - name: Write release keystore from CI secret
++        # AliGram private release signing (2026-11-21): fresh AliGram-only
++        # keystore, kept as the RELEASE_KEYSTORE_BASE64 GitHub Actions
++        # secret, NEVER committed to the repo. CI decodes it to
++        # TMessagesProj/release.keystore (CI workspace only), overwriting
++        # the tracked upstream file. Fail fast if the secret is missing.
++        # Passwords come from KEYSTORE_PASS / ALIAS_NAME / ALIAS_PASS
++        # secrets (see build.gradle: env takes precedence over
++        # LOCAL_PROPERTIES). No secret value is ever printed.
++        env:
++          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
++        run: |
++          set -euo pipefail
++          if [ -z "${RELEASE_KEYSTORE_BASE64:-}" ]; then
++            echo "FAIL: RELEASE_KEYSTORE_BASE64 secret is empty or missing."
++            exit 1
++          fi
++          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > TMessagesProj/release.keystore
++          test -s TMessagesProj/release.keystore
++          echo "OK: release keystore written (size $(stat -c%s TMessagesProj/release.keystore) bytes)."
+       - name: Unit Tests
++        env:
++          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
++          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
++          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+         run: |
+           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+           export DEBUG_BUILD=true
+-          sed -i 's/signingConfig = signingConfigs.release//g' TMessagesProj/build.gradle
+           ./gradlew TMessagesProj:testDebugUnitTest
+       - name: Debug Build
++        env:
++          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
++          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
++          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+         run: |
+           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+           export DEBUG_BUILD=true
+-          sed -i 's/signingConfig = signingConfigs.release//g' TMessagesProj/build.gradle
+           ./gradlew TMessagesProj:assembleDebug
+ 
+           APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
+           APK=$(dirname $APK)
+           echo "APK=$APK" >> $GITHUB_ENV
++      - name: Verify release signature and versionCode
++        # The debug APK must be signed with the AliGram release key
++        # (SHA-256 fingerprint below) and carry versionCode 1261, so it
++        # installs over the previous release-signed build. apksigner is
++        # in the Android SDK build-tools installed above.
++        run: |
++          set -euo pipefail
++          APK_FILE=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk' | head -n 1)
++          echo "APK: $APK_FILE"
++          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK_FILE" | tee /tmp/apksigner.txt
++          grep -q "07:16:09:FD:4A:FA:A1:D5:CE:DA:8D:A2:0F:8B:EA:0D:40:4D:41:E3:2B:09:34:44:8C:3F:8B:91:08:A3:FD:88" /tmp/apksigner.txt
++          echo "OK: APK signed with AliGram release key."
++          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK_FILE" | grep -E "package: name='app.aligram' versionCode='1261'" 
++          echo "OK: package app.aligram, versionCode 1261."
+       - name: Crashlytics mapping-upload guard
+         # Phase 3.2 (§11.7): prove the debug build never uploads a
+         # Crashlytics mapping. The dry-run lists every task that would
+         # execute; the upload task must not be among them. The second
+         # command documents which Crashlytics tasks exist at all.
++        env:
++          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
++          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
++          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+         run: |
+           set -euo pipefail
+           ./gradlew TMessagesProj:assembleDebug --dry-run > /tmp/aligram-dryrun.txt
+-- 
+2.43.0
+

@@ -1,0 +1,61 @@
+From b2c58e64d0f6c4e2063ad1e6e1bdd3256edfb855 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:43:40 +0000
+Subject: [PATCH 32/67] ci(aligram): Crashlytics mapping-upload guard + Room
+ generated-sources artifact (Phase 3.2)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- After Debug Build, a dry-run of assembleDebug must not list any
+  uploadCrashlyticsMappingFile task (proves §11.7: no mapping upload
+  runs in the debug build); tasks --all documents which Crashlytics
+  tasks exist at all.
+- Upload Room's generated DAO implementations as AliGram-Room-
+  Generated so the claimJobsForFile @Transaction wrapping (§11.6)
+  can be read directly from PreservedRefDao_Impl.java.
+---
+ .github/workflows/aligram-build.yml | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/.github/workflows/aligram-build.yml b/.github/workflows/aligram-build.yml
+index 206566e61..bd1bed1ef 100644
+--- a/.github/workflows/aligram-build.yml
++++ b/.github/workflows/aligram-build.yml
+@@ -69,6 +69,33 @@ jobs:
+           APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
+           APK=$(dirname $APK)
+           echo "APK=$APK" >> $GITHUB_ENV
++      - name: Crashlytics mapping-upload guard
++        # Phase 3.2 (§11.7): prove the debug build never uploads a
++        # Crashlytics mapping. The dry-run lists every task that would
++        # execute; the upload task must not be among them. The second
++        # command documents which Crashlytics tasks exist at all.
++        run: |
++          set -euo pipefail
++          ./gradlew TMessagesProj:assembleDebug --dry-run > /tmp/aligram-dryrun.txt
++          if grep -q "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt; then
++            echo "FAIL: Crashlytics mapping upload task is in the debug build graph:"
++            grep "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt
++            exit 1
++          fi
++          echo "OK: no Crashlytics mapping-upload task in the debug build graph."
++          ./gradlew TMessagesProj:tasks --all | grep -i "crashlytics" || echo "No Crashlytics tasks registered."
++      - name: Collect Room generated sources
++        # Phase 3.2 (§11.6): surface Room's generated DAO code so the
++        # claimJobsForFile @Transaction wrapping can be read directly.
++        run: |
++          echo "Room-generated DAO implementations for the AliGram package:"
++          find TMessagesProj/build/generated -name '*Dao_Impl.java' -path '*aligram*' -print || true
++      - name: Upload Room generated sources
++        uses: actions/upload-artifact@v7
++        with:
++          name: AliGram-Room-Generated
++          path: TMessagesProj/build/generated/ap_generated_sources/**/com/radolyn/ayugram/aligram/*Dao_Impl.java
++          if-no-files-found: warn
+       - name: Upload Artifacts
+         uses: actions/upload-artifact@v7
+         with:
+-- 
+2.43.0
+

@@ -1,0 +1,136 @@
+From ba488076c2225e1e79311d4a2fe079498cecf54f Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:00:57 +0000
+Subject: [PATCH 21/67] =?UTF-8?q?fix(aligram):=20D-10=20=E2=80=94=20re-rea?=
+ =?UTF-8?q?d=20the=20ref=20before=20bind;=20D-09(2)=20transactional-bind?=
+ =?UTF-8?q?=20gap?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: liveSyncEdit (storage queue, state ENQUEUED + updateRef) and
+bindEditRevision (globalQueue, role/revisionSeq/state + updateRef)
+mutate a live ref off copyQueue while copyForRef may be mid-copy on
+copyQueue holding a stale snapshot — Room @Update writes the whole
+entity, so the last writer wins and a copy of the OLD media could land
+as COPIED on a ref already re-pointed at the NEW media. Fix, per
+audit: bindCopied re-reads the ref by id immediately before binding
+and aborts (no ref write, no refcount touch) when the row is gone or
+its documentId/photoId/dcId/expectedSize/expectedFileName/state differ
+from the snapshot; the refcount increment moved inside bindCopied,
+after the check, so an aborted bind never leaks a count. The publish
+path sweeps the orphaned blob on abort. A same-media LIVE->EDIT role
+change is explicitly NOT an abort (same media, binding is correct).
+This is also D-09 fix (2) (re-read before bind). Residual: the
+re-read and the update are not one transaction — a re-point landing
+in the few-DAO-call window between them could still win; closing it
+needs a transactional bind with the check in SQL (noted in code).
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 62 ++++++++++++++++---
+ 1 file changed, 55 insertions(+), 7 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 7a5d2b636..4975e018e 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1297,7 +1297,6 @@ public final class AliGramPreservation {
+         }
+         if (existing != null) {
+             AliGramFileCopy.deleteQuietly(result.finalFile);
+-            blobDao.incrementRefCount(existing.blobId);
+             bindCopied(job, existing.blobId, dao, blobDao, previousBlobId);
+             return;
+         }
+@@ -1333,7 +1332,6 @@ public final class AliGramPreservation {
+                 return;
+             }
+             AliGramFileCopy.deleteQuietly(result.finalFile);
+-            blobDao.incrementRefCount(raced.blobId);
+             bindCopied(job, raced.blobId, dao, blobDao, previousBlobId);
+             return;
+         }
+@@ -1352,19 +1350,68 @@ public final class AliGramPreservation {
+         if (!published) {
+             AliGramFileCopy.deleteQuietly(result.finalFile);
+         }
+-        blobDao.incrementRefCount(blobId);
+-        bindCopied(job, blobId, dao, blobDao, previousBlobId);
++        if (!bindCopied(job, blobId, dao, blobDao, previousBlobId)) {
++            // Ref re-pointed or terminated mid-copy (D-10): the published
++            // blob is orphaned (refCount 0, no ref points at it) — sweep
++            // it promptly instead of leaving it for a later sweep.
++            sweepRefcountZeroBlobs(job.accountId);
++        }
+     }
+ 
+-    /** Commit point: bind blobId, mark COPIED, release the delete gate. */
+-    private static void bindCopied(PreservedRef job, String blobId, PreservedRefDao dao,
+-                                   PreservedBlobDao blobDao, String previousBlobId) {
++    /**
++     * Commit point: bind blobId, mark COPIED, release the delete gate.
++     *
++     * <p>Phase 3.1 (D-10 + D-09 fix (2)): the single-writer rule for the
++     * state column is enforced here by re-reading the ref immediately
++     * before the bind. {@code liveSyncEdit} (storage queue) and
++     * {@code bindEditRevision} (globalQueue) mutate a live ref's
++     * identity/state off {@code copyQueue} while a {@code copyForRef}
++     * for the same ref may be mid-copy holding a stale snapshot — and a
++     * plain {@code dao.updateRef(job)} writes the whole entity, so the
++     * last writer wins: a copy of the OLD media could land as COPIED on
++     * a ref that was already re-pointed at the NEW media. When the
++     * fresh row is gone or its identity/state differ from the snapshot,
++     * the bind is ABORTED (false, without touching the ref or the blob
++     * refcount); callers drop their temp output, and the publish path
++     * sweeps the orphaned blob. The refcount increment lives here, after
++     * the check, so an aborted bind never leaks a count. A same-media
++     * role change (LIVE→EDIT by bindEditRevision, same identity) is
++     * NOT an abort: the copy is of that same media, so binding it to
++     * the (now EDIT) ref is correct.
++     *
++     * <p>Residual micro-race (by design, not closed here): the re-read
++     * and the update are not one transaction, so a re-point landing
++     * between them could still win the last-writer race. Closing it
++     * needs a transactional bind (state/identity checked in SQL). The
++     * window is a few DAO calls wide, and the re-point would have to
++     * land exactly there; the audit's prescribed fix is this re-read.
++     */
++    private static boolean bindCopied(PreservedRef job, String blobId, PreservedRefDao dao,
++                                      PreservedBlobDao blobDao, String previousBlobId) {
++        PreservedRef fresh = null;
++        try {
++            fresh = dao.getRefById(job.refId);
++        } catch (Throwable ignored) {
++        }
++        if (fresh == null
++                || fresh.documentId != job.documentId || fresh.photoId != job.photoId
++                || fresh.dcId != job.dcId || fresh.expectedSize != job.expectedSize
++                || (fresh.expectedFileName == null ? job.expectedFileName != null
++                        : !fresh.expectedFileName.equals(job.expectedFileName))
++                || fresh.state == null || !fresh.state.equals(job.state)) {
++            FileLog.d(TAG + ": bind aborted for ref " + job.refId + " — ref re-pointed or terminated mid-copy");
++            return false;
++        }
+         if (previousBlobId != null && !previousBlobId.equals(blobId)) {
+             try {
+                 blobDao.decrementRefCount(previousBlobId);
+             } catch (Throwable ignored) {
+             }
+         }
++        try {
++            blobDao.incrementRefCount(blobId);
++        } catch (Throwable ignored) {
++        }
+         job.blobId = blobId;
+         job.state = AliGramEligibility.STATE_COPIED;
+         job.updatedAt = System.currentTimeMillis() / 1000;
+@@ -1380,6 +1427,7 @@ public final class AliGramPreservation {
+         }
+         releaseDeferredDeletesForRef(job.accountId, job.refId);
+         sweepRefcountZeroBlobs(job.accountId);
++        return true;
+     }
+ 
+     /** Terminal transition + both-halves cancellation helper. */
+-- 
+2.43.0
+

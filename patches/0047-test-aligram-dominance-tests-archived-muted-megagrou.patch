@@ -1,0 +1,448 @@
+From b2353a300b7e33f54b2842be7df8e884dfcd9b67 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 16:45:42 +0300
+Subject: [PATCH 47/67] =?UTF-8?q?test(aligram):=20dominance=20tests=20?=
+ =?UTF-8?q?=E2=80=94=20archived/muted/megagroup/M-T-off=20preserve,=20swee?=
+ =?UTF-8?q?p,=20PENDING=20window?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../ayugram/aligram/AliGramDominanceTest.java | 424 ++++++++++++++++++
+ 1 file changed, 424 insertions(+)
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDominanceTest.java
+
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDominanceTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDominanceTest.java
+new file mode 100644
+index 000000000..dfdfd9919
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDominanceTest.java
+@@ -0,0 +1,424 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/**
++ * Deterministic JVM unit tests for Preserve Media DOMINANCE +
++ * RETRY-UNTIL-SUCCESS (2026-11-21, Ali's requirement).
++ *
++ * <p>Scope: the pure policy in {@link AliGramEligibility} only, plus
++ * SPEC-MODEL tests (labelled as such) for the Android-side decisions
++ * that cannot run on a plain JVM — exactly like the T-H9 / T-R19
++ * spec-model tests in {@link AliGramEligibilityTest}. A spec-model test
++ * pins the rule the production code implements; it does NOT prove the
++ * production call site wires it up. The wiring (MessagesStorage hook
++ * passes no folder/mute/post values any more;
++ * {@code AliGramPreservation.saveMediaEnabledForDialog} returns true
++ * for an opted-in dialog; the sweep runs on startup and after a stamp)
++ * is verified by code inspection and by the device test plan, not here.
++ *
++ * <p>What dominance means, pinned here:
++ * <ul>
++ *   <li>Archive folder, custom folder, mute, and hide/display state
++ *       can never block an opted-in dialog — {@code canIngest} takes
++ *       no such input at all (the parameters were REMOVED, not ignored:
++ *       there is nothing left for a caller to pass to re-enable them).</li>
++ *   <li>A megagroup/supergroup message ({@code channel_id != 0,
++ *       {@code post == false}}) preserves. Only a KNOWN broadcast
++ *       channel with {@code post == false} is excluded (defensive-only;
++ *       Telegram sets {@code post=true} on every broadcast post).</li>
++ *   <li>Per-chat Preserve Media is authoritative over the legacy
++ *       Message Saving toggles: for an opted-in dialog the M/T input
++ *       to {@code canIngest} is resolved to true by the caller.</li>
++ *   <li>Global Automatic media download OFF is never an input.</li>
++ *   <li>Legitimate exceptions that STILL block: secret/TTL/once media
++ *       and Ali's own AliGram caps (video cap, per-chat file count,
++ *       storage budget). Roaming PAUSES (no ref, no attempt counted)
++ *       and the sweep retries when the network is normal again.</li>
++ * </ul>
++ *
++ * <p>What retry-until-success means, pinned here:
++ * <ul>
++ *   <li>A first-ingest failure is re-driven by the startup /
++ *       post-stamp sweep (recent window, per-dialog cap, no-LIVE-ref
++ *       check replacing the old pre-existing-row gate).</li>
++ *   <li>A message arriving after enable but before the stamp (the
++ *       PENDING window, {@code date <= stamp}) is preserved after
++ *       stamping, via the enable-moment effective boundary.</li>
++ *   <li>A failed download retries with exponential backoff (60s
++ *       doubling to a 1h cap) up to 24 attempts, and a FAILED
++ *       download-failure ref is re-driven on the next startup — it no
++ *       longer dies after 3 attempts.</li>
++ * </ul>
++ */
++public class AliGramDominanceTest {
++
++    private static final int A = 1_700_000_000;
++
++    /** A fully-valid ingest argument set (all gates open, date after A). */
++    private boolean ingestOk(int messageDate, boolean preExisting) {
++        return AliGramEligibility.canIngest(
++                true, true, true, true, false,
++                true, true, true, false,
++                true, messageDate, A, AliGramEligibility.ActivationState.STAMPED, preExisting);
++    }
++
++    // ------------------------------------------------------------------
++    // (a) Archive gate REMOVED — no folder/mute input exists at all.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void archivedOptedInChannelPreserves() {
++        // There is no archive/folder parameter to pass any more: an
++        // archived opted-in channel preserves exactly like any other.
++        // Before 2026-11-21 this case was rejected at
++        // AliGramEligibility:424 (isArchived) via the
++        // MessagesStorage:12834 folder_id == 1 probe.
++        assertTrue(ingestOk(A + 1, false));
++        assertNull(AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++
++    @Test
++    public void mutedOptedInChannelPreserves() {
++        // Mute was proven absent from the code (0 matches, 2026-11-21)
++        // and stays absent: no mute input exists, so a muted opted-in
++        // channel preserves. This test pins that the decision function
++        // cannot be given a mute value to veto with.
++        assertTrue(ingestOk(A + 1, false));
++    }
++
++    @Test
++    public void hiddenFolderDisplayStateNeverGatesIngest() {
++        // HIDDEN-FOLDER CONTRACT (2026-11-21, no hidden-folder code
++        // exists yet): ingest must never consult folder, mute, hide, or
++        // display state. The contract is structural — canIngest's
++        // parameter list contains no display state of any kind — so
++        // this test asserts the ingest decision is identical with no
++        // display input available at all, and documents the one future
++        // intersection: the "AliGram preserved media" settings list
++        // (which names dialogs) must be filtered while locked, when
++        // the hidden-folder feature lands. Ingest itself needs no
++        // change for that.
++        assertTrue(ingestOk(A + 1, false));
++        assertTrue(ingestOk(A + 86400, false));
++    }
++
++    // ------------------------------------------------------------------
++    // (b) Post gate: megagroup messages are group messages.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void channelPostRule_truthTable() {
++        // Not a known broadcast channel (megagroup, unknown chat, or
++        // non-channel peer): post flag is irrelevant, always passes.
++        assertTrue(AliGramEligibility.isChannelPostOk(false, false));
++        assertTrue(AliGramEligibility.isChannelPostOk(false, true));
++        // Known broadcast channel: only a real post passes. In practice
++        // Telegram sets post=true on every broadcast post, so the false
++        // branch is defensive-only.
++        assertTrue(AliGramEligibility.isChannelPostOk(true, true));
++        assertFalse(AliGramEligibility.isChannelPostOk(true, false));
++    }
++
++    @Test
++    public void megagroupMessagePreserves() {
++        // Megagroup: channel_id != 0, post == false — the exact case
++        // the old MessagesStorage:12835 rule
++        // (peer==null || channel_id==0 || post) rejected. Resolved via
++        // isChannelPostOk(false, false) == true, so ingest runs.
++        assertTrue(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true,
++                AliGramEligibility.isChannelPostOk(false, false), false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++
++    @Test
++    public void knownBroadcastNonPostStillExcluded() {
++        // The only exclusion left: a KNOWN broadcast channel whose
++        // message is genuinely not a post.
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true,
++                AliGramEligibility.isChannelPostOk(true, false), false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("CHANNEL_POST", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, false, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++
++    // ------------------------------------------------------------------
++    // (c) Per-chat opt-in is AUTHORITATIVE over the M/T toggles.
++    // ------------------------------------------------------------------
++
++    /**
++     * SPEC-MODEL of {@code AliGramPreservation.saveMediaEnabledForDialog}
++     * (Android: reads NaConfig + opt-in prefs; not JVM-runnable). The
++     * model mirrors the production branch exactly: opted-in wins, the
++     * toggles decide only for non-opted-in dialogs.
++     */
++    private static boolean modelSaveMediaForDialog(boolean optedIn, boolean masterOn, boolean perTypeOn) {
++        if (optedIn) {
++            return true;
++        }
++        return masterOn && perTypeOn;
++    }
++
++    @Test
++    public void privateChannelWithMtToggleOffStillPreserves() {
++        // Private channel, master toggle OFF and per-type toggle OFF:
++        // for an opted-in dialog the M/T input resolves to true, so
++        // ingest runs. Before dominance this was the Rank-2 cause
++        // (Preservation.java:358-387): the whole class silently never
++        // preserved.
++        assertTrue(modelSaveMediaForDialog(true, false, false));
++        assertTrue(modelSaveMediaForDialog(true, true, false));
++        assertTrue(modelSaveMediaForDialog(true, false, true));
++        assertTrue(AliGramEligibility.canIngest(
++                true, true, true, modelSaveMediaForDialog(true, false, false),
++                false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        // Non-opted-in dialogs still obey the toggles (unchanged).
++        assertFalse(modelSaveMediaForDialog(false, false, true));
++        assertFalse(modelSaveMediaForDialog(false, true, false));
++        assertTrue(modelSaveMediaForDialog(false, true, true));
++    }
++
++    @Test
++    public void globalAutoDownloadOffStillPreserves() {
++        // Global Automatic media download (downloadMask) was never an
++        // ingest input and still is not: canIngest has no such
++        // parameter, so OFF changes nothing for an opted-in dialog.
++        assertTrue(ingestOk(A + 1, false));
++    }
++
++    // ------------------------------------------------------------------
++    // (d) Legitimate exceptions ONLY: secret/TTL + Ali's own caps.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void legitimateExceptionsStillBlock() {
++        // Secret / TTL / once media: excluded by design (v1).
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, true, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("SECRET_TTL", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, true, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        // Over-cap video: Ali's own cap still bites.
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, false, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("SIZE_CAP", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, false, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        // Exhausted per-chat budget: still bites.
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                false, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("BUDGET", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                false, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++
++    // ------------------------------------------------------------------
++    // (e) Per-message rejection logging: gate names are stable.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void rejectionReasonsAreStableAndDistinct() {
++        assertEquals("OPTED_OUT", AliGramEligibility.ingestRejectReason(
++                false, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("MASTERS_OFF", AliGramEligibility.ingestRejectReason(
++                true, false, false, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("SAVE_MEDIA_OFF", AliGramEligibility.ingestRejectReason(
++                true, true, true, false, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("MEDIA_CLASS", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, false, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("ROAMING_PAUSED", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, true,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("GATE_CLOSED", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.PENDING, false));
++        assertEquals("BEFORE_ACTIVATION", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                true, A, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("PRE_EXISTING", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, true));
++        // First failure wins: several gates closed at once reports the
++        // earliest in evaluation order, never a misleading later one.
++        assertEquals("OPTED_OUT", AliGramEligibility.ingestRejectReason(
++                false, false, false, false, true, false, false, false, true,
++                false, A - 1, A, AliGramEligibility.ActivationState.PENDING, true));
++    }
++
++    // ------------------------------------------------------------------
++    // Retry-until-success: effective activation (PENDING window).
++    // ------------------------------------------------------------------
++
++    @Test
++    public void effectiveActivationTime() {
++        // Enable-moment estimate earlier than the stamp wins.
++        assertEquals(A + 10, AliGramEligibility.effectiveActivationTime(A + 100, A + 10));
++        // Unknown estimate (0 / negative): the stamp wins.
++        assertEquals(A + 100, AliGramEligibility.effectiveActivationTime(A + 100, 0));
++        assertEquals(A + 100, AliGramEligibility.effectiveActivationTime(A + 100, -5));
++        // Estimate at/after the stamp (clock weirdness): the stamp wins.
++        assertEquals(A + 100, AliGramEligibility.effectiveActivationTime(A + 100, A + 100));
++        assertEquals(A + 100, AliGramEligibility.effectiveActivationTime(A + 100, A + 200));
++    }
++
++    @Test
++    public void pendingWindowMessagePreservedAfterStamp() {
++        // Enable at A+10 (server estimate), stamp at A+100. A message
++        // dated A+50 arrived after enable but before the stamp: with
++        // the raw stamp boundary it is LOST (date <= stamp); with the
++        // effective boundary it preserves.
++        int effective = AliGramEligibility.effectiveActivationTime(A + 100, A + 10);
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 50, A + 100, AliGramEligibility.ActivationState.STAMPED, false));
++        assertTrue(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 50, effective, AliGramEligibility.ActivationState.STAMPED, false));
++        // A message from BEFORE enable is still excluded (no leak).
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 5, effective, AliGramEligibility.ActivationState.STAMPED, false));
++        // …and the activation second itself stays sacrificed (strict >).
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 10, effective, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++
++    // ------------------------------------------------------------------
++    // Retry-until-success: sweep re-drives a first-ingest failure.
++    // ------------------------------------------------------------------
++
++    /**
++     * SPEC-MODEL of the sweep (Android: Room + messages_v2 + storage
++     * queue; not JVM-runnable). The production sweep replaces the
++     * pre-existing-row gate with its own no-LIVE-ref check: a message
++     * is a sweep candidate when it has no LIVE ref and its date is
++     * after the effective activation, and it is then ingested with
++     * preExisting=false.
++     */
++    private static boolean modelSweepCandidate(boolean hasLiveRef, int messageDate, int effectiveActivation) {
++        return !hasLiveRef && messageDate > effectiveActivation;
++    }
++
++    @Test
++    public void missedMessageReDrivenOnStartupSweep() {
++        // The trap: first ingest failed, the row now exists in
++        // messages_v2, so the LIVE path rejects the re-put on
++        // PRE_EXISTING — permanently, before this change.
++        assertFalse(ingestOk(A + 1, true));
++        assertEquals("PRE_EXISTING", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, true));
++        // The sweep: same message, no LIVE ref → candidate, ingested
++        // with the pre-existing gate replaced → preserves.
++        assertTrue(modelSweepCandidate(false, A + 1, A));
++        assertTrue(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        // Already-preserved messages are never re-driven.
++        assertFalse(modelSweepCandidate(true, A + 1, A));
++        // Pre-activation messages are never sweep candidates either.
++        assertFalse(modelSweepCandidate(false, A - 1, A));
++        assertFalse(modelSweepCandidate(false, A, A));
++    }
++
++    @Test
++    public void sweepBoundsAreSane() {
++        // Per-dialog cap and recent window are the anti-bulk-history
++        // bounds: 50 messages, 7 days.
++        assertEquals(50, AliGramEligibility.SWEEP_MAX_MESSAGES_PER_DIALOG);
++        assertEquals(7 * 24 * 3600, AliGramEligibility.SWEEP_RECENT_WINDOW_SECONDS);
++    }
++
++    // ------------------------------------------------------------------
++    // Retry-until-success: download backoff + FAILED re-drive.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void downloadRetryBackoff() {
++        // 60s, doubling per attempt, capped at 1h.
++        assertEquals(60_000L, AliGramEligibility.downloadRetryDelayMs(1));
++        assertEquals(120_000L, AliGramEligibility.downloadRetryDelayMs(2));
++        assertEquals(240_000L, AliGramEligibility.downloadRetryDelayMs(3));
++        assertEquals(480_000L, AliGramEligibility.downloadRetryDelayMs(4));
++        assertEquals(960_000L, AliGramEligibility.downloadRetryDelayMs(5));
++        assertEquals(1_920_000L, AliGramEligibility.downloadRetryDelayMs(6));
++        assertEquals(3_600_000L, AliGramEligibility.downloadRetryDelayMs(7));
++        assertEquals(3_600_000L, AliGramEligibility.downloadRetryDelayMs(24));
++        assertEquals(3_600_000L, AliGramEligibility.downloadRetryDelayMs(100));
++        // Roaming re-check interval: 15 minutes, never an attempt.
++        assertEquals(15 * 60_000L, AliGramEligibility.ROAMING_RETRY_DELAY_MS);
++    }
++
++    @Test
++    public void downloadAttemptsBudget() {
++        // The old code died after 3 attempts; the new ceiling is 24.
++        assertEquals(24, AliGramEligibility.MAX_DOWNLOAD_ATTEMPTS);
++        assertFalse(AliGramEligibility.downloadAttemptsExhausted(0));
++        assertFalse(AliGramEligibility.downloadAttemptsExhausted(3));
++        assertFalse(AliGramEligibility.downloadAttemptsExhausted(23));
++        assertTrue(AliGramEligibility.downloadAttemptsExhausted(24));
++        assertTrue(AliGramEligibility.downloadAttemptsExhausted(25));
++        // The 3-attempt COPY budget is unchanged (separate path).
++        assertEquals(3, AliGramEligibility.MAX_COPY_ATTEMPTS);
++        assertTrue(AliGramEligibility.attemptsExhausted(3));
++        assertFalse(AliGramEligibility.attemptsExhausted(2));
++    }
++
++    @Test
++    public void failedDownloadIsRedrivenOnStartup() {
++        // FAILED + DOWNLOAD_FAILED + budget left → re-drive.
++        assertTrue(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_DOWNLOAD_FAILED, 3));
++        assertTrue(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_DOWNLOAD_FAILED, 23));
++        // Budget spent → stays FAILED.
++        assertFalse(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_DOWNLOAD_FAILED, 24));
++        // Other terminal reasons are never revived.
++        assertFalse(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_SOURCE_GONE, 1));
++        assertFalse(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_NO_SPACE, 1));
++        assertFalse(AliGramEligibility.shouldRedriveFailedDownload(
++                AliGramEligibility.REASON_NO_PIN_SOURCE, 1));
++        assertFalse(AliGramEligibility.shouldRedriveFailedDownload(null, 1));
++    }
++
++    @Test
++    public void roamingPausesNotPermanentlyFails() {
++        // Live ingest while roaming is rejected — but with the
++        // ROAMING_PAUSED reason: no ref is created, no attempt is
++        // counted, and the sweep / retry re-attempts the message when
++        // the network is normal again. That is a pause, not a failure.
++        assertFalse(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, true,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        assertEquals("ROAMING_PAUSED", AliGramEligibility.ingestRejectReason(
++                true, true, true, true, false, true, true, true, true,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++        // …and the same message preserves once roaming ends: the
++        // roaming flag is the ONLY thing that changed.
++        assertTrue(AliGramEligibility.canIngest(
++                true, true, true, true, false, true, true, true, false,
++                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
++    }
++}
+-- 
+2.43.0
+

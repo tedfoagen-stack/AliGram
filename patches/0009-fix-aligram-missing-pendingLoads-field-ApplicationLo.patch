@@ -1,0 +1,84 @@
+From 1fe86e436d37aa63ec8e4f8b49b33f71d8a733cb Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:28:04 +0000
+Subject: [PATCH 09/67] fix(aligram): missing pendingLoads field,
+ ApplicationLoader import, probe scope
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Run 43609937453 failed compileDebugJavaWithJavac with 15 error sites
+from 3 root causes:
+- pendingLoads (the H-C fan-out map) was used in 12 places but its
+  field declaration was never written;
+- ApplicationLoader was used in AliGramPreservation but never imported;
+- the H-I pre-existence probe was declared in the first
+  putMessagesInternal pass (REPLACE) while maybeIngest is called in
+  the second pass (auto-download) — two separate loops over the same
+  list in the same order. Probes are now stashed per index in a
+  Boolean[] declared before the first pass and consumed in the second.
+---
+ .../radolyn/ayugram/aligram/AliGramPreservation.java   |  4 ++++
+ .../java/org/telegram/messenger/MessagesStorage.java   | 10 ++++++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 50723b348..607776ed9 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -9,6 +9,7 @@ import android.text.TextUtils;
+ import com.radolyn.ayugram.messages.AyuSavePreferences;
+ 
+ import org.telegram.messenger.AndroidUtilities;
++import org.telegram.messenger.ApplicationLoader;
+ import org.telegram.messenger.ChatObject;
+ import org.telegram.messenger.DialogObject;
+ import org.telegram.messenger.DispatchQueue;
+@@ -81,6 +82,9 @@ public final class AliGramPreservation {
+     /** File-name mirror for the UI-thread cancel filter (no DAO on the UI thread). */
+     private static final ConcurrentHashMap<String, Long> pinnedNameMirror = new ConcurrentHashMap<>();
+ 
++    /** In-flight H-I downloads, keyed by pendingKey(account, expectedFileName) — the H-C fan-out set. */
++    private static final ConcurrentHashMap<String, PendingLoad> pendingLoads = new ConcurrentHashMap<>();
++
+     /** Captured-delete notes, keyed {@code account|dialogId|messageId} (snapshot → mark ordering). */
+     private static final ConcurrentHashMap<String, Long> capturedDeletes = new ConcurrentHashMap<>();
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+index 9e7184de5..f6492b2ef 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+@@ -12094,6 +12094,14 @@ public class MessagesStorage extends BaseController {
+                 state_tasks = null;
+                 int minDeleteTime = Integer.MAX_VALUE;
+ 
++                // --- AliGram hook (H-I pre-existence probes, Phase 2.3 §1.2):
++                // the REPLACE pass below writes the rows, so each probe must
++                // run before its row is written. The ingest hook lives in the
++                // second pass below (after the auto-download block), and both
++                // passes iterate the same `messages` list in the same order, so
++                // the probe results are stashed per index here and consumed there.
++                Boolean[] aligramPreExistingByIndex = new Boolean[messages.size()];
++
+                 for (int a = 0; a < messages.size(); a++) {
+                     TLRPC.Message message = messages.get(a);
+                     fixUnsupportedMedia(message);
+@@ -12111,6 +12119,7 @@ public class MessagesStorage extends BaseController {
+                     } catch (Throwable e) {
+                         FileLog.e(e);
+                     }
++                    aligramPreExistingByIndex[a] = aligramPreExisting;
+ 
+                     int messageId = message.id;
+                     MessageObject.getDialogId(message);
+@@ -12824,6 +12833,7 @@ public class MessagesStorage extends BaseController {
+                     try {
+                         boolean aligramArchived = getDialogFolderIdInternal(message.dialog_id) == 1;
+                         boolean aligramChannelPostOk = message.peer_id == null || message.peer_id.channel_id == 0 || message.post;
++                        Boolean aligramPreExisting = aligramPreExistingByIndex[a];
+                         AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting, aligramArchived, aligramChannelPostOk);
+                     } catch (Throwable e) {
+                         FileLog.e(e);
+-- 
+2.43.0
+

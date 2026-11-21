@@ -1,0 +1,172 @@
+From ec99a31ad79067da74e5851f89fb7ec1dd84633b Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:59:25 +0000
+Subject: [PATCH 15/67] =?UTF-8?q?fix(aligram):=20D-04=20=E2=80=94=20deferr?=
+ =?UTF-8?q?ed-delete=20release=20can=20never=20fire=20for=200,0=20pin=20va?=
+ =?UTF-8?q?lues?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: decideRelease (AliGramEligibility) answers KEEP_MISMATCH for
+any existing file against sizeAtPin/mtimeAtPin = 0,0; Layer-2 passes
+literal 0,0 (FileLoader.java:1770); pinForEdit / pinForMediaRemoval
+leave both at 0 while the source is still downloading; nothing ever
+refreshed the row. Fix, per audit: (1) recordDeferredDelete stats the
+file when called with 0,0 (covers Layer-2 and the L1 pin path);
+(2) refresh PENDING rows on materialisation — new
+DeferredDeleteDao.refreshSizeMtimeForPath + refreshDeferredForPath,
+called in onFileLoaded, the watchdog reconcile and copyForRef on
+success; (3) the release itself treats a still-0,0 row as unverified
+and deletes when no active pin remains (covers rows written before
+this fix), with decideRelease unchanged for verified pins.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 73 ++++++++++++++++++-
+ .../ayugram/aligram/DeferredDeleteDao.java    | 12 +++
+ 2 files changed, 81 insertions(+), 4 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index f5b3236a5..faa51827f 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -879,6 +879,10 @@ public final class AliGramPreservation {
+                         job.sourceSize = file.length();
+                         job.sourceMtime = file.lastModified();
+                         dao.updateRef(job);
++                        // Phase 3.1 (D-04): the file just materialised —
++                        // refresh any PENDING deferred rows recorded with
++                        // 0,0 while it was still downloading.
++                        refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
+                     }
+                     mirrorPut(job);
+                     final long refId = job.refId;
+@@ -1089,6 +1093,9 @@ public final class AliGramPreservation {
+             job.state = AliGramEligibility.STATE_COPYING;
+             dao.updateRef(job);
+             mirrorPut(job);
++            // Phase 3.1 (D-04): the file just materialised — refresh any
++            // PENDING deferred rows recorded with 0,0.
++            refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
+             copyForRef(refId, onDisk);
+             return;
+         }
+@@ -1188,6 +1195,11 @@ public final class AliGramPreservation {
+             }
+             return;
+         }
++        // Phase 3.1 (D-04): the copy succeeded, so the source is complete
++        // on disk with its final size/mtime — refresh any PENDING deferred
++        // rows recorded with 0,0 while it was still downloading, so the
++        // release after bind can pass decideRelease.
++        refreshDeferredForPath(source.getAbsolutePath(), source.length(), source.lastModified());
+         // Dedupe at copy time: same (documentId|photoId, dcId, size, sha256) ⇒ reuse.
+         String blobId = AliGramEligibility.blobIdFor(job.documentId, job.photoId, job.dcId,
+                 result.size, result.sha256Hex);
+@@ -1408,6 +1420,27 @@ public final class AliGramPreservation {
+                     refId = 0;
+                 }
+             }
++            // Phase 3.1 (D-04): a row recorded with sizeAtPin/mtimeAtPin
++            // == 0,0 can NEVER pass decideRelease (any existing file
++            // mismatches 0,0), so Layer-2 rows and pins made before the
++            // download finished were marked DONE without deleting the
++            // file. Stat the file here when the caller passed 0,0: the
++            // Layer-2 guard only knows the path, and a pin's
++            // sourceSize/sourceMtime are 0 while its source is still
++            // downloading. When the file does not exist (yet), keep 0,0 —
++            // the release then sees ALREADY_GONE, and the
++            // materialisation refresh (refreshDeferredForPath) fills in
++            // the real values once the file lands.
++            if (sizeAtPin == 0 && mtimeAtPin == 0) {
++                try {
++                    File f = new File(absolutePath);
++                    if (f.isFile()) {
++                        sizeAtPin = f.length();
++                        mtimeAtPin = f.lastModified();
++                    }
++                } catch (Throwable ignored) {
++                }
++            }
+             DeferredDelete row = new DeferredDelete();
+             row.accountId = account;
+             row.refId = refId;
+@@ -1481,6 +1514,23 @@ public final class AliGramPreservation {
+         }
+     }
+ 
++    /**
++     * Phase 3.1 (D-04): refresh PENDING deferred rows for a path whose
++     * file has just materialised with its final size/mtime (completion
++     * or watchdog reconcile or successful copy). Rows recorded while the
++     * source was still downloading carry 0,0; without this refresh the
++     * release decision could never pass and the file would leak.
++     */
++    private static void refreshDeferredForPath(String absolutePath, long size, long mtime) {
++        try {
++            DeferredDeleteDao dao = AliGramData.deferredDao();
++            if (dao != null && absolutePath != null && !absolutePath.isEmpty()) {
++                dao.refreshSizeMtimeForPath(absolutePath, size, mtime);
++            }
++        } catch (Throwable ignored) {
++        }
++    }
++
+     /**
+      * Release deferred deletes for one ref. Only the copy-queue worker (and
+      * the startup sweep, on the same queue) executes this, and only after
+@@ -1535,10 +1585,25 @@ public final class AliGramPreservation {
+                 return; // another active pin covers the path; released when it terminates
+             }
+             File file = new File(row.absolutePath);
+-            AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
+-                    file.exists(), file.exists() ? file.length() : 0,
+-                    file.exists() ? file.lastModified() : 0,
+-                    row.sizeAtPin, row.mtimeAtPin);
++            AliGramEligibility.ReleaseDecision decision;
++            if (row.sizeAtPin == 0 && row.mtimeAtPin == 0 && file.exists()) {
++                // Phase 3.1 (D-04): a row recorded with 0,0 was never
++                // verified against any file — there is nothing to
++                // mismatch against, so decideRelease would answer
++                // KEEP_MISMATCH forever. No active pin covers the path
++                // (checked above), and Telegram asked for this path to
++                // be deleted: delete it. Pre-existing 0,0 rows (written
++                // before the record-time stat + materialisation refresh)
++                // are covered by this; new rows get real values instead.
++                // decideRelease itself is unchanged for verified pins.
++                decision = AliGramEligibility.ReleaseDecision.DELETE;
++                FileLog.d(TAG + ": releasing unverified (0,0) deferred delete for " + row.absolutePath);
++            } else {
++                decision = AliGramEligibility.decideRelease(
++                        file.exists(), file.exists() ? file.length() : 0,
++                        file.exists() ? file.lastModified() : 0,
++                        row.sizeAtPin, row.mtimeAtPin);
++            }
+             if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
+                 if (row.cancelDeferred) {
+                     cancelLoadFileByName(account, file.getName());
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
+index 7a34c4c90..7edf0acaa 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
+@@ -80,6 +80,18 @@ public interface DeferredDeleteDao {
+     @Query("UPDATE DeferredDelete SET state = :state WHERE id = :id")
+     void setState(long id, String state);
+ 
++    /**
++     * Phase 3.1 (D-04): refresh a PENDING row's recorded size/mtime when
++     * the pinned file materialises. Rows recorded while the source was
++     * still downloading carry {@code sizeAtPin == 0 && mtimeAtPin == 0}
++     * (nothing on disk to stat at record time); without this refresh the
++     * release decision could never pass {@code decideRelease} and the
++     * file would leak. Only PENDING rows are touched — a row already
++     * DONE was settled and must never be rewritten.
++     */
++    @Query("UPDATE DeferredDelete SET sizeAtPin = :sizeAtPin, mtimeAtPin = :mtimeAtPin WHERE absolutePath = :absolutePath AND state = 'PENDING'")
++    void refreshSizeMtimeForPath(String absolutePath, long sizeAtPin, long mtimeAtPin);
++
+     /** Terminal rows only (a DONE row's file was already handled). */
+     @Query("DELETE FROM DeferredDelete WHERE state = 'DONE'")
+     void deleteDone();
+-- 
+2.43.0
+

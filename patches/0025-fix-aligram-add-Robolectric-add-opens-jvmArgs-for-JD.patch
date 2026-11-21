@@ -1,0 +1,62 @@
+From adca089903f6712d5f4490cb4808001b93760abb Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:09:27 +0000
+Subject: [PATCH 25/67] fix(aligram): add Robolectric --add-opens jvmArgs for
+ JDK 17+ unit tests
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Run 43629996060 (head 89f1250a): Unit Tests failed 22/22 Robolectric
+tests with java.lang.RuntimeException at AndroidInterceptors.java:88,
+caused by IllegalAccessException — FileDescriptorInterceptor.setInt
+reflectively calls jdk.internal.access.SharedSecrets, which JPMS
+forbids on JDK 21 without --add-opens. Compilation and all 42
+pure-JVM tests were green; no production code was at fault.
+
+Fix: testOptions.unitTests.all jvmArgs with the exact --add-opens
+list from the official Robolectric getting-started guide
+('Running with Java 17 and higher'). Test-harness config only;
+no production code touched.
+---
+ TMessagesProj/build.gradle | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/TMessagesProj/build.gradle b/TMessagesProj/build.gradle
+index d9795bfed..d60ceed33 100644
+--- a/TMessagesProj/build.gradle
++++ b/TMessagesProj/build.gradle
+@@ -184,6 +184,30 @@ android {
+ 
+     sourceSets.main.jniLibs.srcDirs = ['./jni/']
+ 
++    // AliGram: Robolectric unit tests on JDK 17+ (CI uses Temurin 21) need
++    // --add-opens so the sandbox can touch internal OpenJDK APIs. Without
++    // these, every Robolectric test fails in FileDescriptorInterceptor.setInt
++    // (jdk.internal.access.SharedSecrets) with IllegalAccessException
++    // (run 43629996060: 22/22 Robolectric tests failed, 0 production-code
++    // failures — compilation and all 42 pure-JVM tests were green).
++    // List is verbatim from the official Robolectric getting-started guide
++    // (robolectric.org/getting-started, "Running with Java 17 and higher").
++    testOptions {
++        unitTests.all {
++            jvmArgs += [
++                "--add-opens=java.base/java.lang=ALL-UNNAMED",
++                "--add-opens=java.base/java.util=ALL-UNNAMED",
++                "--add-opens=java.base/java.io=ALL-UNNAMED",
++                "--add-opens=java.base/java.net=ALL-UNNAMED",
++                "--add-opens=java.base/java.security=ALL-UNNAMED",
++                "--add-opens=java.base/java.text=ALL-UNNAMED",
++                "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
++                "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
++                "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
++            ]
++        }
++    }
++
+     namespace = 'org.telegram.messenger'
+ }
+ 
+-- 
+2.43.0
+

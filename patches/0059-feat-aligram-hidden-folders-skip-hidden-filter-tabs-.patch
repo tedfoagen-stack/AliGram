@@ -1,0 +1,40 @@
+From 12ab3a24758eed293aaf18e57d49839642398675 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:11:01 +0300
+Subject: [PATCH 59/67] =?UTF-8?q?feat(aligram):=20hidden=20folders=20?=
+ =?UTF-8?q?=E2=80=94=20skip=20hidden=20filter=20tabs=20while=20locked?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../java/org/telegram/ui/Components/FilterTabsView.java     | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/FilterTabsView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/FilterTabsView.java
+index 6b1fdc191..52c8b1e59 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/FilterTabsView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/FilterTabsView.java
+@@ -54,6 +54,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
+ import androidx.recyclerview.widget.LinearSmoothScroller;
+ import androidx.recyclerview.widget.RecyclerView;
+ 
++import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+ import org.telegram.messenger.AccountInstance;
+ import org.telegram.messenger.AndroidUtilities;
+ import org.telegram.messenger.Emoji;
+@@ -2198,6 +2199,11 @@ public class FilterTabsView extends FrameLayout {
+         removeTabs();
+         for (int a = 0, N = filters.size(); a < N; a++) {
+             MessagesController.DialogFilter dialogFilter = filters.get(a);
++            // --- AliGram hidden folders: skip the tab while locked. Tab ids
++            // stay the filter indices, so counters/selection keep working.
++            if (!AliGramHiddenFolders.isUnlocked(UserConfig.selectedAccount) && AliGramHiddenFolders.isFilterHidden(UserConfig.selectedAccount, dialogFilter.id)) {
++                continue;
++            }
+             if (filters.get(a).isDefault()) {
+                 if (showAllChatsTab)
+                     addTab(a, 0, LocaleController.getString("FilterAllChats", R.string.FilterAllChats), null, null, false, true, false);
+-- 
+2.43.0
+

@@ -1,0 +1,60 @@
+From 1a7fc6a590d08844e35ed4a9f3d5825882cfa522 Mon Sep 17 00:00:00 2001
+From: Flint <flint@aligram.local>
+Date: Sun, 15 Nov 2026 19:04:06 +0000
+Subject: [PATCH 41/67] fix(aligram): write google-services.json from CI secret
+ in pr.yml
+
+The google-services plugin (re-applied by the FCM commit) fails the
+upstream pr.yml build on the checked-in upstream google-services.json
+(no client for app.aligram). Add the same secret-write step as in
+aligram-build.yml so pr.yml builds with Ali's app.aligram client.
+The secret is never committed; the step fails fast if it is missing.
+---
+ .github/workflows/pr.yml | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/.github/workflows/pr.yml b/.github/workflows/pr.yml
+index 7ac5a7b38..a4c98f825 100644
+--- a/.github/workflows/pr.yml
++++ b/.github/workflows/pr.yml
+@@ -43,6 +43,37 @@ jobs:
+             echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
+           fi
+           cat gradle.properties
++      - name: Write google-services.json from CI secret
++        # AliGram R1 (FCM): same step as in aligram-build.yml.
++        # google-services.json is a GitHub Actions secret
++        # (GOOGLE_SERVICES_JSON), NEVER committed to the repo. The
++        # committed file stays upstream's (nu.gpu.nagram, project
++        # nagram-x); CI overwrites it with Ali's app.aligram client
++        # (project aligram-41bad) before the build, so the google-services
++        # plugin generates the right Firebase resources. Without this
++        # step the plugin fails on the checked-in file ("No matching
++        # client found for package name 'app.aligram'"). Fail fast if the
++        # secret is missing, and validate the JSON without printing any
++        # values (only the package_name assertion is ever shown).
++        env:
++          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
++        run: |
++          set -euo pipefail
++          if [ -z "${GOOGLE_SERVICES_JSON:-}" ]; then
++            echo "FAIL: GOOGLE_SERVICES_JSON secret is empty or missing. Create the repository secret (Settings -> Secrets and variables -> Actions -> GOOGLE_SERVICES_JSON) with the app.aligram google-services.json content, then re-run."
++            exit 1
++          fi
++          printf '%s' "$GOOGLE_SERVICES_JSON" > TMessagesProj/google-services.json
++          python3 - <<'EOF'
++          import json
++          with open("TMessagesProj/google-services.json", encoding="utf-8") as f:
++              data = json.load(f)
++          clients = data.get("client", [])
++          assert len(clients) == 1, "expected exactly 1 client, got %d" % len(clients)
++          pkg = clients[0].get("client_info", {}).get("android_client_info", {}).get("package_name")
++          assert pkg == "app.aligram", "unexpected package_name: %r" % (pkg,)
++          print("OK: google-services.json is valid JSON with a single app.aligram client.")
++          EOF
+       - name: Debug Build
+         run: |
+           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+-- 
+2.43.0
+

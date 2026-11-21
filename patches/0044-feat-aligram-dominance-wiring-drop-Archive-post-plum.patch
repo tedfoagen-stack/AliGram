@@ -1,0 +1,40 @@
+From 88b1c1c089e75fbba2f3bed56092ee8cd1615d32 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 16:45:29 +0300
+Subject: [PATCH 44/67] =?UTF-8?q?feat(aligram):=20dominance=20wiring=20?=
+ =?UTF-8?q?=E2=80=94=20drop=20Archive/post=20plumbing=20from=20putMessages?=
+ =?UTF-8?q?=20hook?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../java/org/telegram/messenger/MessagesStorage.java   | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+index f6492b2ef..47c0055d0 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+@@ -12830,11 +12830,15 @@ public class MessagesStorage extends BaseController {
+                     // preservation. Runs after the REPLACE above (so the row
+                     // now exists) but the pre-existence probe was taken at
+                     // the loop top, before the row was written.
++                    // DOMINANCE (2026-11-21): no folder/mute/post plumbing
++                    // is passed any more — the Archive gate is removed and
++                    // the channel-post rule (megagroup passes) is computed
++                    // inside maybeIngest from the resolved chat. The
++                    // upstream auto-download block above keeps its own
++                    // folder check (getDialogFolderIdInternal), untouched.
+                     try {
+-                        boolean aligramArchived = getDialogFolderIdInternal(message.dialog_id) == 1;
+-                        boolean aligramChannelPostOk = message.peer_id == null || message.peer_id.channel_id == 0 || message.post;
+                         Boolean aligramPreExisting = aligramPreExistingByIndex[a];
+-                        AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting, aligramArchived, aligramChannelPostOk);
++                        AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting);
+                     } catch (Throwable e) {
+                         FileLog.e(e);
+                     }
+-- 
+2.43.0
+

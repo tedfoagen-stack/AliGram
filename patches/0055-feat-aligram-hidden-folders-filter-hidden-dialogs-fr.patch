@@ -1,0 +1,61 @@
+From 032f1042c833d7a966230e71cf542f747a311af2 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:10:37 +0300
+Subject: [PATCH 55/67] =?UTF-8?q?feat(aligram):=20hidden=20folders=20?=
+ =?UTF-8?q?=E2=80=94=20filter=20hidden=20dialogs=20from=20dialog=20list=20?=
+ =?UTF-8?q?(copy,=20live=20list=20untouched)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../telegram/ui/Adapters/DialogsAdapter.java  | 26 +++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Adapters/DialogsAdapter.java b/TMessagesProj/src/main/java/org/telegram/ui/Adapters/DialogsAdapter.java
+index cd393c4dd..1d5321b99 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Adapters/DialogsAdapter.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Adapters/DialogsAdapter.java
+@@ -32,6 +32,7 @@ import androidx.recyclerview.widget.DiffUtil;
+ import androidx.recyclerview.widget.RecyclerView;
+ import androidx.viewpager.widget.ViewPager;
+ 
++import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+ import org.telegram.messenger.AndroidUtilities;
+ import org.telegram.messenger.BuildVars;
+ import org.telegram.messenger.ChatObject;
+@@ -1623,6 +1624,31 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
+             if (array == null) {
+                 array = new ArrayList<>();
+             }
++            // --- AliGram hidden folders: display-layer only. Filter a COPY:
++            // getDialogsArray() may return the live list and moveDialogs()
++            // mutates it for pin drag-reorder, so the shared list must
++            // never be filtered in place. Saved Messages (self) and the
++            // Replies pseudo-dialog are never hidden. The grey
++            // reply/forward-source row below is kept: it is only reachable
++            // from inside the source chat itself.
++            if (!AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
++                long selfId = UserConfig.getInstance(currentAccount).clientUserId;
++                long keepId = parentFragment.forwardOriginalChannel != 0 ? parentFragment.forwardOriginalChannel : parentFragment.replyMessageAuthor;
++                ArrayList<TLRPC.Dialog> filtered = new ArrayList<>(array.size());
++                for (int i = 0, n = array.size(); i < n; i++) {
++                    TLRPC.Dialog d = array.get(i);
++                    if (d == null) {
++                        continue;
++                    }
++                    if ((d instanceof TLRPC.TL_dialog || d instanceof TLRPC.TL_dialogCommunity)
++                            && d.id != keepId && d.id != selfId && !UserObject.isReplyUser(d.id)
++                            && AliGramHiddenFolders.isDialogHidden(currentAccount, d.id)) {
++                        continue;
++                    }
++                    filtered.add(d);
++                }
++                array = filtered;
++            }
+         }
+ 
+         dialogsCount = array.size();
+-- 
+2.43.0
+

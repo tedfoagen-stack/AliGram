@@ -1,0 +1,81 @@
+From b687307bb92c1ef4db3431471a9ed891c23c0cc4 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:01:08 +0000
+Subject: [PATCH 23/67] =?UTF-8?q?fix(aligram):=20D-12=20=E2=80=94=20synthe?=
+ =?UTF-8?q?sise=20DeferredDelete=20rows=20from=20pendingDeletePaths=20at?=
+ =?UTF-8?q?=20startup?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: pendingDeletePaths is written in pinForEdit /
+pinForMediaRemoval but a whole-tree grep finds no read anywhere, so a
+delete requested through a path that never went through Layer 1 (the
+process died between the pin insert and the Layer-1 record in the same
+storage pass) was never deleted after the copy terminated. Fix: in
+startupReconcile, for each PINNED/COPYING ref with a non-empty
+pendingDeletePaths, INSERT OR IGNORE one DeferredDelete row per path
+(size/mtime from the ref — statted at record time when 0,0 per D-04 —
+requestedBy EDIT_TAIL, cancelDeferred from the ref). Placement is
+deliberately BEFORE step 4 rather than step 5 as the audit suggests:
+step 4's terminal transitions (GATE_OFF / UNAVAILABLE / FAILED, incl.
+the D-11 change) release the synthesised rows through their normal
+release calls; rows for pins that stay active are skipped by the
+release's active-pin re-check and release when the pin terminates.
+A row Layer 1 already recorded is not duplicated (unique index).
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 38 +++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 72b4074a2..5e5176242 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -2647,6 +2647,44 @@ public final class AliGramPreservation {
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": fakeId verification failed", e);
+         }
++        // D-12 synthesis (BEFORE step 4, deliberately — not in step 5 as
++        // the audit suggests its placement): pendingDeletePaths is the
++        // crash-recovery seed, written at pin time but never read — if
++        // the process died between the pin insert and the Layer-1 record
++        // in the same storage pass, no DeferredDelete row exists for the
++        // file. Synthesise one per recorded path (INSERT OR IGNORE: a
++        // row Layer-1 already recorded is not duplicated; the size/mtime
++        // come from the ref, or are statted at record time when 0,0).
++        // It runs before step 4 so that step 4's terminal transitions
++        // (GATE_OFF / UNAVAILABLE / FAILED) release the synthesised rows
++        // through their normal release calls; rows for pins that stay
++        // active are skipped by the release's active-pin re-check and
++        // release when the pin terminates. Cancel intent comes from the
++        // pin (cancelDeferred) for the same reason.
++        try {
++            for (PreservedRef ref : dao.getNonTerminalRefs()) {
++                if (ref.accountId != account) {
++                    continue;
++                }
++                if (!AliGramEligibility.STATE_PINNED.equals(ref.state)
++                        && !AliGramEligibility.STATE_COPYING.equals(ref.state)) {
++                    continue;
++                }
++                if (ref.pendingDeletePaths == null || ref.pendingDeletePaths.isEmpty()) {
++                    continue;
++                }
++                for (String rawPath : ref.pendingDeletePaths.split(",")) {
++                    String path = rawPath == null ? "" : rawPath.trim();
++                    if (path.isEmpty()) {
++                        continue;
++                    }
++                    recordDeferredDelete(account, ref.refId, path, ref.sourceSize, ref.sourceMtime,
++                            "EDIT_TAIL", ref.cancelDeferred);
++                }
++            }
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": deferred-delete synthesis failed", e);
++        }
+         // 4. Reset DOWNLOADING/COPYING → ENQUEUED after gate re-check;
+         //    re-drive PINNED rows whose source is on disk; PINNED rows
+         //    with no source go straight to UNAVAILABLE (D-11 — they can
+-- 
+2.43.0
+

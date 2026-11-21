@@ -1,0 +1,492 @@
+From 0f983c5e930a1cda0e045d631e8b90d1ad50ee70 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sun, 15 Nov 2026 18:47:13 +0000
+Subject: [PATCH 40/67] feat(aligram): adjustable preservation limits (settings
+ UI)
+
+User-facing settings for the preservation limits, in the AliGram
+section of the Experimental settings screen. Defaults reproduce
+today's behavior exactly; nothing changes until the user touches a row.
+
+- Video cap: one value for both networks (Default = 10 MB mobile /
+  15 MB Wi-Fi; presets 10/15/25/50/75/100 MB) plus a free-form custom
+  value, honored only at 1..100 MB (hard ceiling 100 MB); custom wins
+  over the preset when valid.
+- Document cap: one value for both networks (Default = 1 MB mobile /
+  3 MB Wi-Fi; presets 1/3/5/10/25/50 MB).
+- Max preserved files per chat: 10/25/50/100, default 25.
+- Per-chat storage budget: 100/250/500/1000 MB, default 500 MB.
+- Photos stay uncapped; roaming still blocks ingest; activation
+  boundary, media set, and P/E/X matrix unchanged.
+
+AliGramEligibility gains a pure Limits value type plus Limits-aware
+sizeCapBytes/isWithinSizeCap/withinBudget overloads (legacy
+signatures untouched); AliGramPreservation.limits() reads the NaConfig
+entries and the two ingest sites use them. 5 new deterministic JVM
+tests (80 total, 0 failures expected): defaults, video preset on both
+networks, custom clamping (0/negative unset, 101+ capped at 100,
+custom beats preset), document preset, adjustable budgets.
+---
+ .../ayugram/aligram/AliGramEligibility.java   | 149 ++++++++++++++++++
+ .../ayugram/aligram/AliGramPreservation.java  |  38 ++++-
+ .../NekoExperimentalSettingsActivity.java     |  49 ++++++
+ .../kotlin/xyz/nextalone/nagram/NaConfig.kt   |  36 +++++
+ .../src/main/res/values/strings_nax.xml       |   5 +
+ .../aligram/AliGramEligibilityTest.java       |  90 +++++++++++
+ 6 files changed, 364 insertions(+), 3 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+index d6c907177..417030a7e 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+@@ -240,6 +240,155 @@ public final class AliGramEligibility {
+         return size >= 0 && size <= cap;
+     }
+ 
++    // ------------------------------------------------------------------
++    // Adjustable limits (2026-11-15): user settings from the AliGram
++    // section of the Experimental settings screen. The legacy constants
++    // above stay the defaults; a setting of 0 means "untouched" and
++    // reproduces today's per-network caps exactly. All resolution here
++    // is pure (no Android / SharedPreferences) — the settings are read
++    // in AliGramPreservation.limits() and passed in as a Limits value.
++    // ------------------------------------------------------------------
++
++    /** Hard ceiling for a user-chosen video cap, in MB. */
++    public static final int VIDEO_CAP_CUSTOM_MAX_MB = 100;
++    /** Minimum for a user-chosen video cap, in MB. */
++    public static final int VIDEO_CAP_CUSTOM_MIN_MB = 1;
++    /** Hard ceiling for a user-chosen document cap, in MB (selector max). */
++    public static final int DOCUMENT_CAP_MAX_MB = 50;
++
++    /**
++     * Effective preservation limits resolved from user settings.
++     *
++     * <ul>
++     *   <li>{@code videoCapMb}: preset video cap in MB, applied to BOTH
++     *       networks; 0 = untouched (legacy 10 MiB mobile / 15 MiB Wi-Fi).</li>
++     *   <li>{@code videoCapCustomMb}: free-form video cap in MB; 0 = unset.
++     *       Only 1..100 is honored; anything else is ignored (a valid
++     *       custom value wins over the preset).</li>
++     *   <li>{@code docCapMb}: preset document cap in MB, both networks;
++     *       0 = untouched (legacy 1 MiB mobile / 3 MiB Wi-Fi).</li>
++     *   <li>{@code maxPendingJobs}: max pending jobs per chat (default 25).</li>
++     *   <li>{@code maxPendingBytesMb}: max pending bytes per chat, in MB
++     *       (default 500).</li>
++     * </ul>
++     */
++    public static final class Limits {
++        public final int videoCapMb;
++        public final int videoCapCustomMb;
++        public final int docCapMb;
++        public final int maxPendingJobs;
++        public final int maxPendingBytesMb;
++
++        public Limits(int videoCapMb, int videoCapCustomMb, int docCapMb,
++                      int maxPendingJobs, int maxPendingBytesMb) {
++            this.videoCapMb = videoCapMb;
++            this.videoCapCustomMb = videoCapCustomMb;
++            this.docCapMb = docCapMb;
++            this.maxPendingJobs = maxPendingJobs;
++            this.maxPendingBytesMb = maxPendingBytesMb;
++        }
++
++        /** Defaults reproduce today's behavior exactly. */
++        public static Limits defaults() {
++            return new Limits(0, 0, 0, MAX_PENDING_JOBS_PER_CHAT,
++                    (int) (MAX_PENDING_BYTES_PER_CHAT / (1024L * 1024L)));
++        }
++    }
++
++    /** Custom video cap clamp: 0/negative = unset; otherwise 1..100. */
++    public static int clampCustomVideoCapMb(int rawMb) {
++        if (rawMb < VIDEO_CAP_CUSTOM_MIN_MB) {
++            return 0;
++        }
++        return Math.min(rawMb, VIDEO_CAP_CUSTOM_MAX_MB);
++    }
++
++    /**
++     * Effective video cap in MB: custom (1..100) wins, then preset
++     * (clamped to 1..100), else 0 = legacy per-network caps.
++     */
++    public static int resolveVideoCapMb(Limits limits) {
++        int custom = clampCustomVideoCapMb(limits.videoCapCustomMb);
++        if (custom > 0) {
++            return custom;
++        }
++        if (limits.videoCapMb > 0) {
++            return Math.min(Math.max(limits.videoCapMb, VIDEO_CAP_CUSTOM_MIN_MB), VIDEO_CAP_CUSTOM_MAX_MB);
++        }
++        return 0;
++    }
++
++    /** Effective document cap in MB: preset clamped to 1..50, else 0 = legacy. */
++    public static int resolveDocCapMb(Limits limits) {
++        if (limits.docCapMb <= 0) {
++            return 0;
++        }
++        return Math.min(Math.max(limits.docCapMb, 1), DOCUMENT_CAP_MAX_MB);
++    }
++
++    /** Effective video cap in bytes for a network preset under these limits. */
++    public static long videoCapBytes(NetworkPreset preset, Limits limits) {
++        int mb = resolveVideoCapMb(limits);
++        if (mb == 0) {
++            return preset == NetworkPreset.WIFI ? VIDEO_CAP_WIFI : VIDEO_CAP_MOBILE;
++        }
++        return (long) mb * 1024L * 1024L;
++    }
++
++    /** Effective document cap in bytes for a network preset under these limits. */
++    public static long docCapBytes(NetworkPreset preset, Limits limits) {
++        int mb = resolveDocCapMb(limits);
++        if (mb == 0) {
++            return preset == NetworkPreset.WIFI ? DOCUMENT_CAP_WIFI : DOCUMENT_CAP_MOBILE;
++        }
++        return (long) mb * 1024L * 1024L;
++    }
++
++    /** Size cap in bytes for a class under a network preset and user limits. -1 = no size check (photo). */
++    public static long sizeCapBytes(MediaClass mediaClass, NetworkPreset preset, Limits limits) {
++        switch (mediaClass) {
++            case PHOTO:
++                return -1;
++            case VIDEO:
++            case ROUND_VIDEO:
++            case GIF:
++                return videoCapBytes(preset, limits);
++            case VOICE: {
++                long docCap = docCapBytes(preset, limits);
++                return Math.max(VOICE_FLOOR, docCap);
++            }
++            case DOCUMENT:
++            case MUSIC:
++                return docCapBytes(preset, limits);
++            default:
++                return 0;
++        }
++    }
++
++    /** {@code size} within cap under user limits; {@code size < 0} (unknown) fails closed except photos. */
++    public static boolean isWithinSizeCap(MediaClass mediaClass, long size, NetworkPreset preset, Limits limits) {
++        long cap = sizeCapBytes(mediaClass, preset, limits);
++        if (cap < 0) {
++            return true; // photo: no size check
++        }
++        if (cap == 0) {
++            return false;
++        }
++        return size >= 0 && size <= cap;
++    }
++
++    /** Per-chat budget under user limits: max pending jobs / max pending bytes. */
++    public static boolean withinBudget(int pendingJobs, long pendingBytes, long newSize, Limits limits) {
++        int maxJobs = limits.maxPendingJobs > 0 ? limits.maxPendingJobs : MAX_PENDING_JOBS_PER_CHAT;
++        long maxBytes = limits.maxPendingBytesMb > 0
++                ? (long) limits.maxPendingBytesMb * 1024L * 1024L
++                : MAX_PENDING_BYTES_PER_CHAT;
++        if (pendingJobs >= maxJobs) {
++            return false;
++        }
++        return pendingBytes + Math.max(0, newSize) <= maxBytes;
++    }
++
+     // ------------------------------------------------------------------
+     // Ingest / freeze / binding predicates (Phase 2.3 §4.3).
+     // ------------------------------------------------------------------
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 115765e7c..3fe162e93 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -421,6 +421,38 @@ public final class AliGramPreservation {
+         return AliGramEligibility.NetworkPreset.MOBILE;
+     }
+ 
++    /**
++     * Effective preservation limits from the global AliGram settings
++     * (NaConfig; Experimental settings → AliGram section). Never throws:
++     * an unreadable or malformed value falls back to today's defaults
++     * (see {@link AliGramEligibility.Limits#defaults()}). The custom video
++     * cap is a free-form string; only 1..100 is honored.
++     */
++    public static AliGramEligibility.Limits limits() {
++        int videoCapMb = 0;
++        int videoCapCustomMb = 0;
++        int docCapMb = 0;
++        int maxJobs = 0;
++        int budgetMb = 0;
++        try {
++            videoCapMb = NaConfig.INSTANCE.getAliGramVideoCapMb().Int();
++            docCapMb = NaConfig.INSTANCE.getAliGramDocCapMb().Int();
++            maxJobs = NaConfig.INSTANCE.getAliGramMaxFilesPerChat().Int();
++            budgetMb = NaConfig.INSTANCE.getAliGramBudgetMbPerChat().Int();
++            String custom = NaConfig.INSTANCE.getAliGramVideoCapCustomMb().String();
++            if (custom != null) {
++                try {
++                    videoCapCustomMb = Integer.parseInt(custom.trim());
++                } catch (NumberFormatException ignored) {
++                    videoCapCustomMb = 0;
++                }
++            }
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++        return new AliGramEligibility.Limits(videoCapMb, videoCapCustomMb, docCapMb, maxJobs, budgetMb);
++    }
++
+     public static long ownUserId(int account) {
+         try {
+             return UserConfig.getInstance(account).getClientUserId();
+@@ -705,7 +737,7 @@ public final class AliGramPreservation {
+             boolean mt = saveMediaEnabledForDialog(account, dialogId);
+             boolean mediaOk = AliGramEligibility.isPreservableClass(ident.mediaClass);
+             boolean sizeOk = ident.expectedFileName != null
+-                    && AliGramEligibility.isWithinSizeCap(ident.mediaClass, ident.expectedSize, currentPreset(account));
++                    && AliGramEligibility.isWithinSizeCap(ident.mediaClass, ident.expectedSize, currentPreset(account), limits());
+             boolean roaming = isRoaming(account);
+             PreservedRefDao dao = AliGramData.refDao();
+             if (dao == null) {
+@@ -715,7 +747,7 @@ public final class AliGramPreservation {
+             boolean withinBudget = AliGramEligibility.withinBudget(
+                     dao.getPendingJobCountForDialog(userId, dialogId),
+                     dao.getPendingBytesForDialog(userId, dialogId),
+-                    ident.expectedSize);
++                    ident.expectedSize, limits());
+             boolean eligible = AliGramEligibility.canIngest(true, dOn, eOn, mt, ident.isSecretTtlOnce,
+                     mediaOk, sizeOk, isArchived, isChannelPostOk, roaming, withinBudget,
+                     message.date, act.time, act.state, preExisting != null && preExisting);
+@@ -2026,7 +2058,7 @@ public final class AliGramPreservation {
+             boolean mediaOk = AliGramEligibility.isPreservableClass(newIdent.mediaClass);
+             boolean sizeOk = newIdent.expectedFileName != null
+                     && AliGramEligibility.isWithinSizeCap(newIdent.mediaClass, newIdent.expectedSize,
+-                    currentPreset(account));
++                    currentPreset(account), limits());
+             if (!AliGramEligibility.canEnrolNewMediaAtEdit(true, dOn, eOn, mt, newIdent.isSecretTtlOnce,
+                     mediaOk, sizeOk, newMessage.edit_date, act.time, act.state, false, false)) {
+                 return;
+diff --git a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
+index 06bb08272..2c500d69a 100644
+--- a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
++++ b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/settings/NekoExperimentalSettingsActivity.java
+@@ -189,6 +189,55 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity
+             .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
+             .makeRed(AlertDialog.BUTTON_POSITIVE)
+             .show()));
++    // --- AliGram: adjustable preservation limits. Defaults reproduce
++    // today's caps (video 10 MiB mobile / 15 MiB Wi-Fi, documents 1 MiB /
++    // 3 MiB, 25 files / 500 MiB per chat); nothing changes until the user
++    // touches a row. The custom video value wins over the preset when
++    // valid (1..100); empty means unset.
++    private final AbstractConfigCell headerAliGramLimits = cellGroup.appendCell(new ConfigCellHeader("AliGram"));
++    private final AbstractConfigCell aliGramVideoCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramVideoCapMb(), new String[]{
++            "Default (10 MB mobile / 15 MB Wi-Fi)",
++            "10 MB",
++            "15 MB",
++            "25 MB",
++            "50 MB",
++            "75 MB",
++            "100 MB",
++    }, new int[]{0, 10, 15, 25, 50, 75, 100}, null));
++    private final AbstractConfigCell aliGramVideoCapCustomRow = cellGroup.appendCell(new ConfigCellTextInput(null, NaConfig.INSTANCE.getAliGramVideoCapCustomMb(), "1–100", null,
++            raw -> raw == null ? "" : raw.trim(),
++            (raw, checked) -> {
++                if (checked == null || checked.isEmpty()) {
++                    return false; // empty = unset
++                }
++                try {
++                    int v = Integer.parseInt(checked);
++                    return v < 1 || v > 100;
++                } catch (NumberFormatException e) {
++                    return true;
++                }
++            }));
++    private final AbstractConfigCell aliGramDocCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramDocCapMb(), new String[]{
++            "Default (1 MB mobile / 3 MB Wi-Fi)",
++            "1 MB",
++            "3 MB",
++            "5 MB",
++            "10 MB",
++            "25 MB",
++            "50 MB",
++    }, new int[]{0, 1, 3, 5, 10, 25, 50}, null));
++    private final AbstractConfigCell aliGramMaxFilesRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramMaxFilesPerChat(), new String[]{
++            "10",
++            "25",
++            "50",
++            "100",
++    }, new int[]{10, 25, 50, 100}, null));
++    private final AbstractConfigCell aliGramBudgetRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramBudgetMbPerChat(), new String[]{
++            "100 MB",
++            "250 MB",
++            "500 MB",
++            "1000 MB",
++    }, new int[]{100, 250, 500, 1000}, null));
+     private final AbstractConfigCell dividerAyuMoments = cellGroup.appendCell(new ConfigCellDivider());
+ 
+     // N-Config
+diff --git a/TMessagesProj/src/main/kotlin/xyz/nextalone/nagram/NaConfig.kt b/TMessagesProj/src/main/kotlin/xyz/nextalone/nagram/NaConfig.kt
+index 3dafcddab..04118469c 100644
+--- a/TMessagesProj/src/main/kotlin/xyz/nextalone/nagram/NaConfig.kt
++++ b/TMessagesProj/src/main/kotlin/xyz/nextalone/nagram/NaConfig.kt
+@@ -606,6 +606,42 @@ object NaConfig {
+             ConfigItem.configTypeBool,
+             true
+         )
++    // --- AliGram: adjustable preservation limits (2026-11-15). Global
++    // (shared "nkmrcfg" prefs). A cap of 0 means "default": the legacy
++    // per-network constants in AliGramEligibility (video 10 MiB mobile /
++    // 15 MiB Wi-Fi, documents 1 MiB / 3 MiB). The custom video cap is a
++    // string so the settings UI can offer a free-form input; it is parsed
++    // at read time and only 1..100 is honored.
++    val aliGramVideoCapMb =
++        addConfig(
++            "AliGramVideoCapMB",
++            ConfigItem.configTypeInt,
++            0
++        )
++    val aliGramVideoCapCustomMb =
++        addConfig(
++            "AliGramVideoCapCustomMB",
++            ConfigItem.configTypeString,
++            ""
++        )
++    val aliGramDocCapMb =
++        addConfig(
++            "AliGramDocCapMB",
++            ConfigItem.configTypeInt,
++            0
++        )
++    val aliGramMaxFilesPerChat =
++        addConfig(
++            "AliGramMaxFilesPerChat",
++            ConfigItem.configTypeInt,
++            25
++        )
++    val aliGramBudgetMbPerChat =
++        addConfig(
++            "AliGramBudgetMBPerChat",
++            ConfigItem.configTypeInt,
++            500
++        )
+     val saveDeletedMessageForBot =
+         addConfig(
+             "SaveDeletedMessageForBot", // save in bot chats
+diff --git a/TMessagesProj/src/main/res/values/strings_nax.xml b/TMessagesProj/src/main/res/values/strings_nax.xml
+index 01c39e079..37d209f92 100644
+--- a/TMessagesProj/src/main/res/values/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values/strings_nax.xml
+@@ -307,6 +307,11 @@
+     <string name="AliGramAboutText">AliGram is a modified Telegram client based on NagramX.\n\nMedia preservation: in selected groups and channels, new media is downloaded when it arrives and kept in private storage, so it survives deletion or edits.\n\nAliGram is free software licensed under the GNU General Public License v3. Upstream source and attribution are preserved in the project repository.</string>
+     <string name="AliGramClearPreservedConfirm">Delete all media preserved by AliGram? Per-chat preservation stays enabled and will keep preserving new media.</string>
+     <string name="AliGramPreservedStorageAbout">Media from selected groups and channels is downloaded when received and kept in private storage, so it survives deletion or edits.</string>
++    <string name="AliGramVideoCapMB">Video size limit</string>
++    <string name="AliGramVideoCapCustomMB">Custom video size limit (MB)</string>
++    <string name="AliGramDocCapMB">Document size limit</string>
++    <string name="AliGramMaxFilesPerChat">Max preserved files per chat</string>
++    <string name="AliGramBudgetMBPerChat">Preserved storage budget per chat</string>
+     <string name="PasskeyLogin">Passkey Login</string>
+     <string name="PasskeyInfo2">This feature only works with password managers that allow the user to manage trust settings for privileged apps, such as **Bitwarden** and **KeePassDX**.</string>
+     <string name="PasskeyUnsupportedTitle">Unsupported password manager</string>
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
+index 789029b8e..ee97b869f 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
+@@ -522,4 +522,94 @@ public class AliGramEligibilityTest {
+         }
+         assertEquals(2, claimed);
+     }
++
++    // ------------------------------------------------------------------
++    // Adjustable limits (2026-11-15): user settings, defaults reproduce
++    // today's caps exactly; nothing changes until the user touches a row.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void limitsDefaultsReproduceTodayCaps() {
++        AliGramEligibility.Limits d = AliGramEligibility.Limits.defaults();
++        assertEquals(10L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, d));
++        assertEquals(15L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.WIFI, d));
++        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, d));
++        assertEquals(3L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.WIFI, d));
++        // Voice floor still applies under defaults.
++        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VOICE, AliGramEligibility.NetworkPreset.MOBILE, d));
++        // Photos stay uncapped under limits.
++        assertEquals(-1L, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.PHOTO, AliGramEligibility.NetworkPreset.WIFI, d));
++        assertTrue(AliGramEligibility.withinBudget(24, 0, 1, d));
++        assertFalse(AliGramEligibility.withinBudget(25, 0, 1, d));
++        assertFalse(AliGramEligibility.withinBudget(0, 500L * 1024 * 1024, 1, d));
++    }
++
++    @Test
++    public void limitsVideoPresetAppliesToBothNetworks() {
++        AliGramEligibility.Limits l = new AliGramEligibility.Limits(50, 0, 0, 25, 500);
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, l));
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.WIFI, l));
++        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 50L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, l));
++        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 50L * 1024 * 1024 + 1, AliGramEligibility.NetworkPreset.WIFI, l));
++        // Round video and GIF share the video cap.
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.GIF, AliGramEligibility.NetworkPreset.MOBILE, l));
++        // Document cap untouched by the video preset.
++        assertEquals(1L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, l));
++    }
++
++    @Test
++    public void limitsCustomVideoCapClamping() {
++        // 0 / negative = unset → legacy caps.
++        assertEquals(0, AliGramEligibility.clampCustomVideoCapMb(0));
++        assertEquals(0, AliGramEligibility.clampCustomVideoCapMb(-5));
++        assertEquals(0, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(0, 0, 0, 25, 500)));
++        // 1..100 accepted verbatim.
++        assertEquals(1, AliGramEligibility.clampCustomVideoCapMb(1));
++        assertEquals(50, AliGramEligibility.clampCustomVideoCapMb(50));
++        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(100));
++        // Above the ceiling clamps to 100, never beyond.
++        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(101));
++        assertEquals(100, AliGramEligibility.clampCustomVideoCapMb(1000));
++        assertEquals(100, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(0, 101, 0, 25, 500)));
++        // Custom wins over the preset when valid.
++        assertEquals(75, AliGramEligibility.resolveVideoCapMb(new AliGramEligibility.Limits(50, 75, 0, 25, 500)));
++        assertEquals(75L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VIDEO, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(50, 75, 0, 25, 500)));
++        // A 60 MiB video passes at custom 100, fails at custom 50.
++        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 60L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(0, 100, 0, 25, 500)));
++        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, 60L * 1024 * 1024, AliGramEligibility.NetworkPreset.MOBILE, new AliGramEligibility.Limits(0, 50, 0, 25, 500)));
++    }
++
++    @Test
++    public void limitsDocPresetAppliesToBothNetworks() {
++        AliGramEligibility.Limits l = new AliGramEligibility.Limits(0, 0, 50, 25, 500);
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.MOBILE, l));
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.DOCUMENT, AliGramEligibility.NetworkPreset.WIFI, l));
++        // Voice floor: max(512 KiB, doc cap) → 50 MiB here.
++        assertEquals(50L * 1024 * 1024, AliGramEligibility.sizeCapBytes(AliGramEligibility.MediaClass.VOICE, AliGramEligibility.NetworkPreset.WIFI, l));
++        // A 10 MiB document passes at doc cap 50, fails at the legacy 3 MiB Wi-Fi cap.
++        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.DOCUMENT, 10L * 1024 * 1024, AliGramEligibility.NetworkPreset.WIFI, l));
++        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.DOCUMENT, 10L * 1024 * 1024, AliGramEligibility.NetworkPreset.WIFI, AliGramEligibility.Limits.defaults()));
++        // Unknown size still fails closed except photos, under limits too.
++        assertFalse(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.VIDEO, -1, AliGramEligibility.NetworkPreset.WIFI, l));
++        assertTrue(AliGramEligibility.isWithinSizeCap(AliGramEligibility.MediaClass.PHOTO, -1, AliGramEligibility.NetworkPreset.WIFI, l));
++    }
++
++    @Test
++    public void limitsBudgetsAreAdjustable() {
++        AliGramEligibility.Limits l = new AliGramEligibility.Limits(0, 0, 0, 100, 1000);
++        assertTrue(AliGramEligibility.withinBudget(99, 0, 1, l));
++        assertFalse(AliGramEligibility.withinBudget(100, 0, 1, l));
++        long mib1000 = 1000L * 1024 * 1024;
++        assertTrue(AliGramEligibility.withinBudget(0, mib1000 - 1, 1, l));
++        assertFalse(AliGramEligibility.withinBudget(0, mib1000, 1, l));
++        // Narrow limits bite: 10 files / 100 MiB.
++        AliGramEligibility.Limits narrow = new AliGramEligibility.Limits(0, 0, 0, 10, 100);
++        assertFalse(AliGramEligibility.withinBudget(10, 0, 1, narrow));
++        assertFalse(AliGramEligibility.withinBudget(0, 100L * 1024 * 1024, 1, narrow));
++        assertTrue(AliGramEligibility.withinBudget(0, 100L * 1024 * 1024 - 1, 1, narrow));
++        // Non-positive stored values fall back to today's defaults.
++        AliGramEligibility.Limits broken = new AliGramEligibility.Limits(0, 0, 0, 0, 0);
++        assertFalse(AliGramEligibility.withinBudget(25, 0, 1, broken));
++        assertFalse(AliGramEligibility.withinBudget(0, 500L * 1024 * 1024, 1, broken));
++    }
+ }
+-- 
+2.43.0
+

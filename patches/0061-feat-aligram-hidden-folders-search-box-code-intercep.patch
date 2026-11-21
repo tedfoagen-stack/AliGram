@@ -1,0 +1,295 @@
+From c5a89cf484abad1d52520ad4294f2ac0d59de919 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:11:11 +0300
+Subject: [PATCH 61/67] =?UTF-8?q?feat(aligram):=20hidden=20folders=20?=
+ =?UTF-8?q?=E2=80=94=20search-box=20code=20intercept,=20tab=20filtering,?=
+ =?UTF-8?q?=20long-press=20Hide/Unhide,=20unread=20subtraction?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../java/org/telegram/ui/DialogsActivity.java | 211 +++++++++++++++++-
+ 1 file changed, 209 insertions(+), 2 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+index e239773c9..6daa8ce91 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+@@ -97,6 +97,7 @@ import androidx.recyclerview.widget.LinearSmoothScrollerCustom;
+ import androidx.recyclerview.widget.RecyclerView;
+ import androidx.viewpager.widget.ViewPager;
+ 
++import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+ import com.radolyn.ayugram.utils.LastSeenHelper;
+ 
+ import org.telegram.messenger.AccountInstance;
+@@ -3487,6 +3488,27 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+             @Override
+             public void onTextChanged(EditText editText) {
+                 String text = editText.getText().toString();
++                // --- AliGram hidden folders: search-box intercept. The
++                // setup flow is debounced inside the core (only the final
++                // ##digits commit, 1000 ms after the last keystroke); the
++                // toggle consumes an exact code match. Both run before any
++                // search, so neither the code nor a ## setup ever becomes a
++                // server query or a recent-search row, and nothing is shown.
++                AliGramHiddenFolders.onSetupTextChanged(currentAccount, text);
++                if (AliGramHiddenFolders.handleSearchText(currentAccount, text)) {
++                    editText.getText().clear();
++                    aliGramWasUnlocked = AliGramHiddenFolders.isUnlocked(currentAccount);
++                    aliGramRefreshAfterLockChange();
++                    return;
++                }
++                if (!AliGramHiddenFolders.hasCodeSet(currentAccount) && AliGramHiddenFolders.isSetupCandidate(text)) {
++                    // Setup candidate on screen: never run a hashtag search
++                    // for it; clear the field shortly after the debounced
++                    // commit so the code does not stay visible.
++                    aliGramScheduleSetupClear(editText, text);
++                    return;
++                }
++                aliGramCancelSetupClear();
+                 if (!text.isEmpty() || (searchViewPager != null && searchViewPager.dialogsSearchAdapter != null && searchViewPager.dialogsSearchAdapter.hasRecentSearch()) || searchFiltersWasShowed || hasStories) {
+                     searchWas = true;
+                     if (!searchIsShowed) {
+@@ -3794,13 +3816,58 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                         return 0;
+                     }
+                     if (tabId == filterTabsView.getDefaultTabId()) {
+-                        return getMessagesStorage().getMainUnreadCount();
++                        return aliGramSubtractHiddenUnread(getMessagesStorage().getMainUnreadCount(), null);
+                     }
+                     ArrayList<MessagesController.DialogFilter> dialogFilters = getMessagesController().getDialogFilters();
+                     if (tabId < 0 || tabId >= dialogFilters.size()) {
+                         return 0;
+                     }
+-                    return getMessagesController().getDialogFilters().get(tabId).unreadCount;
++                    return aliGramSubtractHiddenUnread(getMessagesController().getDialogFilters().get(tabId).unreadCount, getMessagesController().getDialogFilters().get(tabId));
++                }
++
++                // --- AliGram hidden folders: display-level unread
++                // subtraction. The stored counts (mainUnreadCount /
++                // DialogFilter.unreadCount) come from MessagesStorage
++                // calcUnreadCounters, which is deliberately untouched; the
++                // hidden dialogs' unread is subtracted here instead. The
++                // mute/archive flag mirrors are the same ones
++                // calcUnreadCounters applies to each bucket.
++                private int aliGramSubtractHiddenUnread(int total, MessagesController.DialogFilter filter) {
++                    if (total <= 0 || AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
++                        return total;
++                    }
++                    boolean excludeMuted;
++                    if (filter == null) {
++                        excludeMuted = !getNotificationsController().showBadgeMuted;
++                    } else {
++                        excludeMuted = (filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_MUTED) != 0
++                                || NaConfig.INSTANCE.getIgnoreUnreadCount().Int() == NekoConfig.DIALOG_FILTER_EXCLUDE_MUTED;
++                    }
++                    int hiddenUnread = 0;
++                    ArrayList<TLRPC.Dialog> allDialogs = getMessagesController().getAllDialogs();
++                    for (int i = 0, n = allDialogs.size(); i < n; i++) {
++                        TLRPC.Dialog d = allDialogs.get(i);
++                        if (d == null || !AliGramHiddenFolders.isDialogHidden(currentAccount, d.id)) {
++                            continue;
++                        }
++                        if (filter == null) {
++                            if (d.folder_id != 0) {
++                                continue;
++                            }
++                        } else {
++                            if ((filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_ARCHIVED) != 0 && d.folder_id == 1) {
++                                continue;
++                            }
++                            if (!filter.includesDialog(getAccountInstance(), d.id, d)) {
++                                continue;
++                            }
++                        }
++                        if (excludeMuted && getMessagesController().isDialogMuted(d.id)) {
++                            continue;
++                        }
++                        hiddenUnread += getMessagesController().getDialogUnreadCount(d);
++                    }
++                    return Math.max(0, total - hiddenUnread);
+                 }
+ 
+                 @Override
+@@ -3953,6 +4020,20 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                             .addIf(!defaultTab, R.drawable.msg_delete, LocaleController.getString(R.string.FilterDeleteItem), true, () -> {
+                                 showDeleteAlert(dialogFilter);
+                             })
++                            // --- AliGram hidden folders: management only via
++                            // long-press while unlocked. While locked these
++                            // items are absent and the menu is the normal
++                            // Telegram menu. The default tab never offers
++                            // Hide. Reuses existing strings/drawables — no
++                            // new string mentions hiding anywhere.
++                            .addIf(!defaultTab && AliGramHiddenFolders.isUnlocked(currentAccount) && dialogFilter != null && !AliGramHiddenFolders.isFilterHidden(currentAccount, dialogFilter.id), R.drawable.msg_archive_solar, LocaleController.getString(R.string.Hide), () -> {
++                                AliGramHiddenFolders.setFilterHidden(currentAccount, dialogFilter.id, true);
++                                aliGramRefreshAfterLockChange();
++                            })
++                            .addIf(!defaultTab && AliGramHiddenFolders.isUnlocked(currentAccount) && dialogFilter != null && AliGramHiddenFolders.isFilterHidden(currentAccount, dialogFilter.id), R.drawable.msg_unarchive_solar, LocaleController.getString(R.string.Unhide), () -> {
++                                AliGramHiddenFolders.setFilterHidden(currentAccount, dialogFilter.id, false);
++                                aliGramRefreshAfterLockChange();
++                            })
+                             .setDimAlpha(0x60)
+                             .setGravity(Gravity.LEFT)
+                             .translate(dp(-12), dp(-4))
+@@ -7033,6 +7114,93 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+         }
+     }
+ 
++    // --- AliGram hidden folders: lock-state refresh + timers. ---
++
++    /** Lock state last seen by onResume; detects a lock that happened while paused (background lock, auto-lock timer). */
++    private boolean aliGramWasUnlocked;
++    /** UI-side auto-lock refresh, scheduled at unlock; fires when the core 1-hour timer expires. */
++    private Runnable aliGramAutoLockRefreshRunnable;
++    /** Delayed clear of a ## setup candidate after the debounced commit. */
++    private Runnable aliGramSetupClearRunnable;
++
++    /**
++     * Refreshes every display surface after a lock/unlock/hide/unhide
++     * transition: rebuilds the hidden-dialog cache and the per-filter dialog
++     * lists, moves off a now-hidden current tab, rebuilds the tabs and
++     * reloads the lists/counters. Also (re)schedules the UI-side auto-lock
++     * refresh while unlocked.
++     */
++    private void aliGramRefreshAfterLockChange() {
++        getMessagesController().refreshAliGramHiddenFolders();
++        getMessagesController().sortDialogs(null);
++        if (viewPages != null && viewPages.length > 0 && viewPages[0] != null && filterTabsView != null) {
++            int selectedType = viewPages[0].selectedType;
++            ArrayList<MessagesController.DialogFilter> filters = getMessagesController().getDialogFilters();
++            if (selectedType >= 0 && selectedType < filters.size()
++                    && !AliGramHiddenFolders.isUnlocked(currentAccount)
++                    && AliGramHiddenFolders.isFilterHidden(currentAccount, filters.get(selectedType).id)) {
++                viewPages[0].selectedType = filterTabsView.getDefaultTabId();
++                filterTabsView.selectTabWithStableId(filterTabsView.getStableId(0));
++            }
++        }
++        updateFilterTabs(true, false);
++        NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.dialogsNeedReload, true);
++        aliGramScheduleAutoLockRefresh();
++    }
++
++    /** Schedules a UI refresh for when the 1-hour auto-lock expires. The core owns the lock itself; this only refreshes the UI. Cancelled on pause (backgrounding locks via LaunchActivity.onStop, and onResume re-checks). */
++    private void aliGramScheduleAutoLockRefresh() {
++        aliGramCancelAutoLockRefresh();
++        if (!AliGramHiddenFolders.isUnlocked(currentAccount)) {
++            return;
++        }
++        long remaining = AliGramHiddenFolders.getUnlockStartedAt(currentAccount) + AliGramHiddenFolders.AUTO_LOCK_MS - System.currentTimeMillis();
++        if (remaining <= 0) {
++            AliGramHiddenFolders.lock(currentAccount);
++            aliGramRefreshAfterLockChange();
++            return;
++        }
++        aliGramAutoLockRefreshRunnable = () -> {
++            aliGramAutoLockRefreshRunnable = null;
++            if (!AliGramHiddenFolders.isUnlocked(currentAccount)) {
++                aliGramRefreshAfterLockChange();
++            } else {
++                aliGramScheduleAutoLockRefresh();
++            }
++        };
++        AndroidUtilities.runOnUIThread(aliGramAutoLockRefreshRunnable, remaining);
++    }
++
++    private void aliGramCancelAutoLockRefresh() {
++        if (aliGramAutoLockRefreshRunnable != null) {
++            AndroidUtilities.cancelRunOnUIThread(aliGramAutoLockRefreshRunnable);
++            aliGramAutoLockRefreshRunnable = null;
++        }
++    }
++
++    /** Clears a ## setup candidate from the search field shortly after the core's debounced commit, so the code does not stay visible. Re-scheduled on every keystroke, in step with the core debounce. */
++    private void aliGramScheduleSetupClear(EditText editText, String text) {
++        aliGramCancelSetupClear();
++        final String candidate = text;
++        aliGramSetupClearRunnable = () -> {
++            aliGramSetupClearRunnable = null;
++            try {
++                if (editText.getText() != null && candidate.equals(editText.getText().toString())) {
++                    editText.getText().clear();
++                }
++            } catch (Exception ignore) {
++            }
++        };
++        AndroidUtilities.runOnUIThread(aliGramSetupClearRunnable, AliGramHiddenFolders.SETUP_DEBOUNCE_MS + 100);
++    }
++
++    private void aliGramCancelSetupClear() {
++        if (aliGramSetupClearRunnable != null) {
++            AndroidUtilities.cancelRunOnUIThread(aliGramSetupClearRunnable);
++            aliGramSetupClearRunnable = null;
++        }
++    }
++
+     private void updateFilterTabs(boolean force, boolean animated) {
+         if (filterTabsView == null || inPreviewMode || searchIsShowed || (rightSlidingDialogContainer != null && rightSlidingDialogContainer.hasFragment())) {
+             return;
+@@ -7058,8 +7226,25 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+                     filterTabsView.resetTabId();
+                     selectWithStableId = true;
+                 }
++                // --- AliGram hidden folders: if the current tab is a hidden
++                // folder while locked, fall back to All Chats before the
++                // rebuild (a hidden-but-present filter does not trip the
++                // bounds reset above).
++                if (id != filterTabsView.getDefaultTabId() && id >= 0 && id < filters.size()
++                        && !AliGramHiddenFolders.isUnlocked(currentAccount)
++                        && AliGramHiddenFolders.isFilterHidden(currentAccount, filters.get(id).id)) {
++                    filterTabsView.resetTabId();
++                    selectWithStableId = true;
++                    id = filterTabsView.getDefaultTabId();
++                }
+                 filterTabsView.removeTabs();
+                 for (int a = 0, N = filters.size(); a < N; a++) {
++                    // --- AliGram hidden folders: skip the tab while locked.
++                    // The filter itself is untouched, so no empty tab
++                    // appears and "All Chats" stays.
++                    if (!AliGramHiddenFolders.isUnlocked(currentAccount) && AliGramHiddenFolders.isFilterHidden(currentAccount, filters.get(a).id)) {
++                        continue;
++                    }
+                     if (filters.get(a).isDefault()) {
+                         if (filterTabsView.showAllChatsTab) filterTabsView.addTab(a, 0, LocaleController.getString(R.string.FilterAllChats), filters.get(a).emoticon, null, false, true, filters.get(a).locked);
+                     } else {
+@@ -7221,6 +7406,23 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+     @Override
+     public void onResume() {
+         super.onResume();
++        // --- AliGram hidden folders: auto-lock may have fired, or the app
++        // may have been background-locked, while this fragment was paused.
++        // Also clears a ## setup candidate left visible across a pause
++        // (its delayed clear was cancelled in onPause).
++        if (AliGramHiddenFolders.isAutoLockExpired(currentAccount, System.currentTimeMillis())) {
++            AliGramHiddenFolders.lock(currentAccount);
++        }
++        if (aliGramWasUnlocked && !AliGramHiddenFolders.isUnlocked(currentAccount)) {
++            aliGramRefreshAfterLockChange();
++        }
++        aliGramWasUnlocked = AliGramHiddenFolders.isUnlocked(currentAccount);
++        aliGramScheduleAutoLockRefresh();
++        if (fragmentSearchField != null && fragmentSearchField.editText != null && fragmentSearchField.editText.getText() != null
++                && AliGramHiddenFolders.hasCodeSet(currentAccount)
++                && AliGramHiddenFolders.isSetupCandidate(fragmentSearchField.editText.getText().toString())) {
++            fragmentSearchField.editText.getText().clear();
++        }
+         if (dialogStoriesCell != null) {
+             dialogStoriesCell.onResume();
+         }
+@@ -7442,6 +7644,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
+     @Override
+     public void onPause() {
+         super.onPause();
++        // --- AliGram hidden folders: the UI-side auto-lock refresh and the
++        // setup-field clear are cancelled here; backgrounding locks via
++        // LaunchActivity.onStop and onResume re-checks the lock state.
++        aliGramCancelAutoLockRefresh();
++        aliGramCancelSetupClear();
+         if (storiesBulletin != null) {
+             storiesBulletin.hide();
+             storiesBulletin = null;
+-- 
+2.43.0
+

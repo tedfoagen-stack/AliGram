@@ -1,0 +1,36 @@
+From 35a5c11c3abf5139af4322e1c9a87ecf7b99e34e Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:23:23 +0000
+Subject: [PATCH 08/67] fix(aligram): annotate PreservedBlob.blobId @NonNull
+ (Room primary key)
+
+Run 43609524780 failed compileDebugJavaWithJavac: Room requires a
+@NonNull annotation on a String primary key. Only this one error was
+reported; the google-services fix from the previous commit got the
+build past processDebugGoogleServices.
+---
+ .../main/java/com/radolyn/ayugram/aligram/PreservedBlob.java    | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
+index 9b53f2189..a743fc767 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
+@@ -1,5 +1,6 @@
+ package com.radolyn.ayugram.aligram;
+ 
++import androidx.annotation.NonNull;
+ import androidx.room.Entity;
+ import androidx.room.Index;
+ import androidx.room.PrimaryKey;
+@@ -20,6 +21,7 @@ import androidx.room.PrimaryKey;
+ public class PreservedBlob {
+     /** "d<documentId>_<dcId>_<size>_<sha16>" or "p<photoId>_…" (see AliGramEligibility.blobIdFor). */
+     @PrimaryKey
++    @NonNull
+     public String blobId;
+     /** 0 when photo. */
+     public long documentId;
+-- 
+2.43.0
+

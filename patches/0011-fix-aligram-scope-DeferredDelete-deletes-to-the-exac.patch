@@ -1,0 +1,811 @@
+From 644dd95c02781338b917eae344ac34ec74db786c Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:54:46 +0000
+Subject: [PATCH 11/67] =?UTF-8?q?fix(aligram):=20scope=20DeferredDelete=20?=
+ =?UTF-8?q?deletes=20to=20the=20exact=20(account,=20dialog)=20=E2=80=94=20?=
+ =?UTF-8?q?D-06?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+clearPreservedForDialog called deleteForAccount: clearing one chat
+deleted every other chat's deferred rows. Fix: drop each dialog ref
+then release its deferred rows per-ref (account-scoped
+getPendingForRef, refId==0 guard); same release added to
+onDialogDeleted / onDialogClearedExcept / onChannelHistoryCleared,
+which previously never released at all (rows orphaned until restart).
+recordDeferredDelete now validates the refId against the durable row
+(the path mirror is cross-account, so a foreign refId degrades to 0
+instead of being stored). Startup sweep uses account-scoped
+getPendingForAccount + the shared releaseDeferredRow helper.
+New DAO primitives: deleteByAccountAndDialog (subquery via
+refId -> PreservedRef.dialogId; refId==0 rows never matched),
+deleteForRef, getPendingForDialog, getPendingForAccount.
+deleteForAccount stays, only for purgeAccount/clearPreservedStorage.
+Scenario 8 of AliGramRoomIntegrationTest now calls
+deleteByAccountAndDialog (assertions unchanged); new
+AliGramDeferredDeleteScopeTest covers the new DAO surface.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 164 +++++++---
+ .../ayugram/aligram/DeferredDeleteDao.java    |  88 ++++-
+ .../AliGramDeferredDeleteScopeTest.java       | 300 ++++++++++++++++++
+ .../aligram/AliGramRoomIntegrationTest.java   |  55 ++--
+ 4 files changed, 524 insertions(+), 83 deletions(-)
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDeferredDeleteScopeTest.java
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 607776ed9..e9fbc85fa 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1341,7 +1341,18 @@ public final class AliGramPreservation {
+     // Deferred delete (Phase 2.3 §2.2) — Layer 1 / Layer 2 support
+     // ==================================================================
+ 
+-    /** Record a deferred-delete request (INSERT OR IGNORE on the unique key). */
++    /**
++     * Record a deferred-delete request (INSERT OR IGNORE on the unique key).
++     *
++     * <p>Phase 3.1: the {@code refId} is validated against the durable row.
++     * Both record paths resolve it through a path-keyed mirror
++     * ({@code pinnedPathMirror}, shared across accounts because cache
++     * paths can be shared), so it may belong to another account's ref.
++     * A foreign or dangling refId is never stored — it would let one
++     * account's release sweep another account's rows. It degrades to 0
++     * (unattributed): the row is then released only by the account
++     * startup sweep, which re-validates the pin per path.
++     */
+     public static void recordDeferredDelete(int account, long refId, String absolutePath,
+                                             long sizeAtPin, long mtimeAtPin,
+                                             String requestedBy, boolean cancelDeferred) {
+@@ -1353,6 +1364,17 @@ public final class AliGramPreservation {
+             if (dao == null) {
+                 return;
+             }
++            if (refId != 0) {
++                try {
++                    PreservedRefDao refDao = AliGramData.refDao();
++                    PreservedRef pin = refDao == null ? null : refDao.getRefById(refId);
++                    if (pin == null || pin.accountId != account) {
++                        refId = 0; // foreign / dangling mirror entry: unattributed
++                    }
++                } catch (Throwable ignored) {
++                    refId = 0;
++                }
++            }
+             DeferredDelete row = new DeferredDelete();
+             row.accountId = account;
+             row.refId = refId;
+@@ -1432,48 +1454,73 @@ public final class AliGramPreservation {
+      * the ref's terminal transition has committed. Re-checks that no other
+      * active pin covers the path and re-validates size+mtime (H-6): on a
+      * mismatch the row is marked DONE without deleting.
++     *
++     * <p>Phase 3.1 scoping: {@code refId == 0} returns immediately — every
++     * unattributed row shares refId 0, and releasing "for ref 0" would
++     * sweep them all, across dialogs and accounts. Rows are fetched with
++     * the account-scoped {@code getPendingForRef(account, refId)}, so a
++     * foreign refId can never release this account's rows.
+      */
+     public static void releaseDeferredDeletesForRef(int account, long refId) {
+         try {
++            if (refId == 0) {
++                return; // unattributed rows: startup sweep only, never by ref
++            }
+             DeferredDeleteDao dao = AliGramData.deferredDao();
+-            PreservedRefDao refDao = AliGramData.refDao();
+-            if (dao == null || refDao == null) {
++            if (dao == null) {
+                 return;
+             }
+-            List<DeferredDelete> rows = dao.getPendingForRef(refId);
++            List<DeferredDelete> rows = dao.getPendingForRef(account, refId);
+             if (rows == null) {
+                 return;
+             }
+             for (DeferredDelete row : rows) {
+-                try {
+-                    List<PreservedRef> active = refDao.getActivePinsForPath(row.absolutePath);
+-                    if (active != null && !active.isEmpty()) {
+-                        continue; // another active pin covers the path; released when it terminates
+-                    }
+-                    File file = new File(row.absolutePath);
+-                    AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
+-                            file.exists(), file.exists() ? file.length() : 0,
+-                            file.exists() ? file.lastModified() : 0,
+-                            row.sizeAtPin, row.mtimeAtPin);
+-                    if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
+-                        if (row.cancelDeferred) {
+-                            cancelLoadFileByName(account, file.getName());
+-                        }
+-                        ArrayList<File> toDelete = new ArrayList<>();
+-                        toDelete.add(file);
+-                        // The guarded public entry: no active pin remains, so it deletes.
+-                        FileLoader.getInstance(account).deleteFiles(toDelete, 0);
+-                    }
+-                    dao.setState(row.id, "DONE");
+-                } catch (Throwable e) {
+-                    FileLog.e(TAG + ": deferred release row failed", e);
+-                }
++                releaseDeferredRow(account, row);
+             }
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": releaseDeferredDeletesForRef failed", e);
+         }
+     }
+ 
++    /**
++     * Release one PENDING deferred row: skip it while any active pin still
++     * covers the path (another dialog/account may pin the same file),
++     * otherwise delete the file when size+mtime still match the pin and
++     * mark the row DONE (DONE on mismatch / already-gone too — the
++     * request is settled either way). Shared by the per-ref release and
++     * the startup sweep, so the two paths cannot drift apart.
++     */
++    private static void releaseDeferredRow(int account, DeferredDelete row) {
++        try {
++            DeferredDeleteDao dao = AliGramData.deferredDao();
++            PreservedRefDao refDao = AliGramData.refDao();
++            if (dao == null || refDao == null) {
++                return;
++            }
++            List<PreservedRef> active = refDao.getActivePinsForPath(row.absolutePath);
++            if (active != null && !active.isEmpty()) {
++                return; // another active pin covers the path; released when it terminates
++            }
++            File file = new File(row.absolutePath);
++            AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
++                    file.exists(), file.exists() ? file.length() : 0,
++                    file.exists() ? file.lastModified() : 0,
++                    row.sizeAtPin, row.mtimeAtPin);
++            if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
++                if (row.cancelDeferred) {
++                    cancelLoadFileByName(account, file.getName());
++                }
++                ArrayList<File> toDelete = new ArrayList<>();
++                toDelete.add(file);
++                // The guarded public entry: no active pin remains, so it deletes.
++                FileLoader.getInstance(account).deleteFiles(toDelete, 0);
++            }
++            dao.setState(row.id, "DONE");
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": deferred release row failed", e);
++        }
++    }
++
+     private static void cancelLoadFileByName(int account, String fileName) {
+         if (fileName == null) {
+             return;
+@@ -2130,11 +2177,19 @@ public final class AliGramPreservation {
+                     long userId = ownUserId(account);
+                     // Every ref of the dialog (all roles): the dialog's
+                     // messages are gone, so no ref stays anchored.
++                    // Phase 3.1: dropping a ref ends its pin, so each
++                    // dropped ref's deferred rows are released right here
++                    // (per-ref, exact dialog — never account-wide). The
++                    // release re-checks active pins per path, so a file
++                    // another dialog still pins survives. Rows with
++                    // refId == 0 are unattributed and are released only
++                    // by the startup sweep, never here.
+                     for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
+                         if (AliGramEligibility.isActivePinState(ref.state)) {
+                             cancelLoadFileForJob(ref);
+                         }
+                         dropRefAndDecrement(ref);
++                        releaseDeferredDeletesForRef(account, ref.refId);
+                     }
+                     sweepRefcountZeroBlobs(account);
+                 } catch (Throwable e) {
+@@ -2169,6 +2224,10 @@ public final class AliGramPreservation {
+                             cancelLoadFileForJob(ref);
+                         }
+                         dropRefAndDecrement(ref);
++                        // Phase 3.1: per-ref release (see onDialogDeleted).
++                        // Kept messages' refs are not dropped, so their
++                        // deferred rows are never released here.
++                        releaseDeferredDeletesForRef(account, ref.refId);
+                     }
+                     sweepRefcountZeroBlobs(account);
+                 } catch (Throwable e) {
+@@ -2203,6 +2262,10 @@ public final class AliGramPreservation {
+                             cancelLoadFileForJob(ref);
+                         }
+                         dropRefAndDecrement(ref);
++                        // Phase 3.1: per-ref release (see onDialogDeleted).
++                        // Refs above maxMessageId keep their pins, so their
++                        // deferred rows are never released here.
++                        releaseDeferredDeletesForRef(account, ref.refId);
+                     }
+                     sweepRefcountZeroBlobs(account);
+                 } catch (Throwable e) {
+@@ -2333,24 +2396,15 @@ public final class AliGramPreservation {
+         // 5. Sweep unanchored refs + refcount-0 blobs; release orphaned deferred deletes.
+         try {
+             sweepRefcountZeroBlobs(account);
+-            for (DeferredDelete row : deferredDao.getAllPending()) {
+-                if (row.accountId != account) {
+-                    continue;
+-                }
+-                List<PreservedRef> active = dao.getActivePinsForPath(row.absolutePath);
+-                if (active == null || active.isEmpty()) {
+-                    File file = new File(row.absolutePath);
+-                    AliGramEligibility.ReleaseDecision decision = AliGramEligibility.decideRelease(
+-                            file.exists(), file.exists() ? file.length() : 0,
+-                            file.exists() ? file.lastModified() : 0,
+-                            row.sizeAtPin, row.mtimeAtPin);
+-                    if (decision == AliGramEligibility.ReleaseDecision.DELETE) {
+-                        ArrayList<File> toDelete = new ArrayList<>();
+-                        toDelete.add(file);
+-                        FileLoader.getInstance(account).deleteFiles(toDelete, 0);
+-                    }
+-                    deferredDao.setState(row.id, "DONE");
+-                }
++            // Account-scoped (Phase 3.1): never iterate all accounts' rows
++            // here. releaseDeferredRow re-checks active pins per path, so
++            // a file another dialog/account still pins is never deleted.
++            // (One deliberate unification: rows with cancelDeferred=true
++            // now also cancel the load, as the per-ref release does. At
++            // startup no load is in flight in this process, so the cancel
++            // is a no-op.)
++            for (DeferredDelete row : deferredDao.getPendingForAccount(account)) {
++                releaseDeferredRow(account, row);
+             }
+             long cutoff = System.currentTimeMillis() - 3600_000L;
+             capturedDeletes.entrySet().removeIf(entry -> entry.getValue() < cutoff);
+@@ -2543,6 +2597,9 @@ public final class AliGramPreservation {
+                             dao.deleteRefsForAccount(userId);
+                         }
+                         if (deferredDao != null) {
++                            // Account-wide ON PURPOSE here (settings clear-all):
++                            // this operation means "this account, everything".
++                            // Never use deleteForAccount from a dialog flow.
+                             deferredDao.deleteForAccount(account);
+                         }
+                         sweepUnreferencedBlobs();
+@@ -2656,16 +2713,22 @@ public final class AliGramPreservation {
+             copyQueue.postRunnable(() -> {
+                 try {
+                     PreservedRefDao dao = AliGramData.refDao();
+-                    DeferredDeleteDao deferredDao = AliGramData.deferredDao();
+                     if (dao == null) {
+                         return;
+                     }
+                     long userId = ownUserId(account);
++                    // Phase 3.1 (critical fix): the old code called
++                    // deferredDao.deleteForAccount(account) here, deleting
++                    // the WHOLE account's deferred rows for a per-chat
++                    // clear. The fix releases exactly this dialog's rows,
++                    // per dropped ref — the release re-checks active pins
++                    // per path, so a file another dialog still pins
++                    // survives, and rows of other dialogs/accounts are
++                    // never touched. Unattributed (refId == 0) rows are
++                    // left for the startup sweep.
+                     for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
+                         dropRefAndDecrement(ref);
+-                    }
+-                    if (deferredDao != null) {
+-                        deferredDao.deleteForAccount(account);
++                        releaseDeferredDeletesForRef(account, ref.refId);
+                     }
+                     sweepRefcountZeroBlobs(account);
+                 } catch (Throwable e) {
+@@ -2696,6 +2759,9 @@ public final class AliGramPreservation {
+                             dao.deleteRefsForAccount(userId);
+                         }
+                         if (deferredDao != null) {
++                            // Account-wide ON PURPOSE here (account removal):
++                            // this operation means "this account, everything".
++                            // Never use deleteForAccount from a dialog flow.
+                             deferredDao.deleteForAccount(account);
+                         }
+                         sweepUnreferencedBlobs();
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
+index e0678b50d..7a34c4c90 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/DeferredDeleteDao.java
+@@ -7,7 +7,38 @@ import androidx.room.Query;
+ 
+ import java.util.List;
+ 
+-/** DAO for {@link DeferredDelete} (Phase 2.3 §2.2(a)). */
++/**
++ * DAO for {@link DeferredDelete} (Phase 2.3 §2.2(a)).
++ *
++ * <p>Scoping contract (Phase 3.1 — the DeferredDelete scope fix):
++ * {@link DeferredDelete} carries NO {@code dialogId} column, so a
++ * dialog-scoped operation must resolve the dialog through
++ * {@code refId -> PreservedRef.dialogId}. The subquery in
++ * {@link #deleteByAccountAndDialog} / {@link #getPendingForDialog} does
++ * exactly that. Two consequences follow and are pinned by tests:
++ *
++ * <ul>
++ *   <li>Rows with {@code refId == 0} (no live ref — e.g. the Layer-2
++ *       FileLoader guard recorded the row when the pin mirror had no
++ *       entry) are UNATTRIBUTED: no dialog-scoped query can ever match
++ *       them, so they survive dialog cleanups and are released only by
++ *       the account startup sweep, which re-validates the pin per path.
++ *       A dialog cleanup must never delete them.</li>
++ *   <li>{@code refId} is the globally unique {@code PreservedRef} primary
++ *       key, so a refId-keyed operation is account-safe by construction —
++ *       but the account-scoped overload
++ *       {@link #getPendingForRef(int, long)} is still preferred in
++ *       production release paths, so a foreign refId recorded by mistake
++ *       (see {@code AliGramPreservation.recordDeferredDelete}) can never
++ *       release another account's rows.</li>
++ * </ul>
++ *
++ * <p>The only account-wide delete that remains is
++ * {@link #deleteForAccount}, used solely by the two account-wide
++ * operations that mean it ({@code purgeAccount} on logout/account
++ * removal and {@code clearPreservedStorage} from settings). It must
++ * never be called from a dialog-scoped flow.
++ */
+ @Dao
+ public interface DeferredDeleteDao {
+ 
+@@ -17,18 +48,73 @@ public interface DeferredDeleteDao {
+     @Query("SELECT * FROM DeferredDelete WHERE refId = :refId AND state = 'PENDING'")
+     List<DeferredDelete> getPendingForRef(long refId);
+ 
++    /**
++     * Account-scoped variant of {@link #getPendingForRef(long)} — the one
++     * production release paths must use. A row is returned only when BOTH
++     * its {@code accountId} and its {@code refId} match, so a foreign
++     * refId (recorded when the pin mirror held another account's ref)
++     * can never release this account's rows.
++     */
++    @Query("SELECT * FROM DeferredDelete WHERE accountId = :accountId AND refId = :refId AND state = 'PENDING'")
++    List<DeferredDelete> getPendingForRef(int accountId, long refId);
++
+     @Query("SELECT * FROM DeferredDelete WHERE accountId = :accountId AND absolutePath = :absolutePath AND state = 'PENDING'")
+     List<DeferredDelete> getPendingForPath(int accountId, String absolutePath);
+ 
++    /**
++     * PENDING rows of one dialog, resolved through the owning ref:
++     * the row's {@code refId} must point at a {@code PreservedRef} of
++     * this account and dialog. Rows with {@code refId == 0} are never
++     * returned (unattributed — see the class javadoc).
++     */
++    @Query("SELECT * FROM DeferredDelete WHERE accountId = :accountId AND state = 'PENDING' AND refId IN (SELECT refId FROM PreservedRef WHERE accountId = :accountId AND dialogId = :dialogId)")
++    List<DeferredDelete> getPendingForDialog(int accountId, long dialogId);
++
++    /** All PENDING rows of one account (startup sweep; never cross-account). */
++    @Query("SELECT * FROM DeferredDelete WHERE accountId = :accountId AND state = 'PENDING'")
++    List<DeferredDelete> getPendingForAccount(int accountId);
++
+     @Query("SELECT * FROM DeferredDelete WHERE state = 'PENDING'")
+     List<DeferredDelete> getAllPending();
+ 
+     @Query("UPDATE DeferredDelete SET state = :state WHERE id = :id")
+     void setState(long id, String state);
+ 
++    /** Terminal rows only (a DONE row's file was already handled). */
+     @Query("DELETE FROM DeferredDelete WHERE state = 'DONE'")
+     void deleteDone();
+ 
++    /**
++     * ACCOUNT-WIDE delete. Legitimate only for {@code purgeAccount} and
++     * {@code clearPreservedStorage}, which mean "this account, everything".
++     * Never call it from a dialog-scoped flow — that was the Phase 3.1
++     * critical bug (it deleted other dialogs' deferred rows).
++     */
+     @Query("DELETE FROM DeferredDelete WHERE accountId = :accountId")
+     void deleteForAccount(int accountId);
++
++    /**
++     * Dialog-scoped delete (Phase 3.1 fix): delete every deferred row of
++     * exactly one (account, dialog), resolving the dialog through
++     * {@code refId -> PreservedRef.dialogId} because {@link DeferredDelete}
++     * has no {@code dialogId} column. Rows with {@code refId == 0} are
++     * never matched (unattributed). Callers that drop refs must call this
++     * while the dialog's refs still exist — afterwards the subquery
++     * resolves to nothing. Production dialog cleanups normally RELEASE
++     * rows first (which deletes the file with size+mtime re-validation);
++     * this is the row-level primitive for those cleanups and for tests.
++     */
++    @Query("DELETE FROM DeferredDelete WHERE accountId = :accountId AND refId IN (SELECT refId FROM PreservedRef WHERE accountId = :accountId AND dialogId = :dialogId)")
++    void deleteByAccountAndDialog(int accountId, long dialogId);
++
++    /**
++     * Delete every deferred row of one ref. Safe across accounts because
++     * {@code refId} is the globally unique {@code PreservedRef} primary
++     * key. Only call it after the ref is dropped or terminal and its rows
++     * have been released (i.e. they are DONE); never use it to drop a
++     * still-PENDING row whose file release is owed — use the release path
++     * ({@code releaseDeferredDeletesForRef}) for that.
++     */
++    @Query("DELETE FROM DeferredDelete WHERE refId = :refId")
++    void deleteForRef(long refId);
+ }
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDeferredDeleteScopeTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDeferredDeleteScopeTest.java
+new file mode 100644
+index 000000000..1ec58d113
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramDeferredDeleteScopeTest.java
+@@ -0,0 +1,300 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import android.content.Context;
++
++import androidx.room.Room;
++import androidx.test.core.app.ApplicationProvider;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.RobolectricTestRunner;
++import org.robolectric.annotation.Config;
++
++import java.util.List;
++import java.util.concurrent.Callable;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * DAO-level regression tests for the Phase 3.1 DeferredDelete scope fix.
++ *
++ * <p>Proves, against the REAL {@link AliGramDatabase} (in-memory) under
++ * Robolectric, that every dialog-scoped deferred-delete operation touches
++ * exactly one (account, dialog):
++ *
++ * <ul>
++ *   <li>{@code deleteByAccountAndDialog} deletes only the rows whose ref
++ *       belongs to that dialog (resolved via
++ *       {@code refId -> PreservedRef.dialogId}, because
++ *       {@link DeferredDelete} has no {@code dialogId} column);</li>
++ *   <li>rows with {@code refId == 0} (unattributed — no live ref) are
++ *       NEVER matched by a dialog-scoped operation;</li>
++ *   <li>the account-scoped {@code getPendingForRef(account, refId)} and
++ *       {@code getPendingForAccount} never leak another account's rows;</li>
++ *   <li>{@code deleteForRef} deletes only that ref's rows.</li>
++ * </ul>
++ *
++ * <p>Threading mirrors production (no {@code allowMainThreadQueries()}):
++ * every DAO call runs on a worker thread via {@link #onDb(Callable)}.
++ * The controller wiring (clearPreservedForDialog / onDialogDeleted
++ * releasing per dropped ref instead of calling the account-wide
++ * {@code deleteForAccount}) is NOT executable in this harness — it needs
++ * UserConfig / FileLoader / the copy queue — and is verified by code
++ * review + the DAO contract proven here.
++ */
++@RunWith(RobolectricTestRunner.class)
++@Config(sdk = 36)
++public class AliGramDeferredDeleteScopeTest {
++
++    private static final long USER_0 = 1000L;
++    private static final long USER_1 = 2000L;
++    private static final int ACCOUNT_0 = 0;
++    private static final int ACCOUNT_1 = 1;
++    private static final long DIALOG_A = -100111L;
++    private static final long DIALOG_B = -100222L;
++    private static final long T0 = 1_700_000_000L;
++
++    private AliGramDatabase db;
++    private ExecutorService dbExecutor;
++
++    @Before
++    public void setUp() {
++        dbExecutor = Executors.newSingleThreadExecutor();
++        Context ctx = ApplicationProvider.getApplicationContext();
++        db = Room.inMemoryDatabaseBuilder(ctx, AliGramDatabase.class).build();
++    }
++
++    @After
++    public void tearDown() throws Exception {
++        if (db != null) {
++            try {
++                onDb(() -> {
++                    db.close();
++                    return null;
++                });
++            } catch (Exception ignored) {
++            }
++            db = null;
++        }
++        if (dbExecutor != null) {
++            dbExecutor.shutdownNow();
++            dbExecutor.awaitTermination(10, TimeUnit.SECONDS);
++            dbExecutor = null;
++        }
++    }
++
++    private <T> T onDb(Callable<T> work) throws Exception {
++        Future<T> f = dbExecutor.submit(work);
++        return f.get(30, TimeUnit.SECONDS);
++    }
++
++    private void onDbVoid(Runnable work) throws Exception {
++        onDb(() -> {
++            work.run();
++            return null;
++        });
++    }
++
++    private static PreservedRef newRef(long userId, int accountId, long dialogId, int messageId) {
++        PreservedRef ref = new PreservedRef();
++        ref.userId = userId;
++        ref.accountId = accountId;
++        ref.dialogId = dialogId;
++        ref.messageId = messageId;
++        ref.role = "LIVE";
++        ref.revisionSeq = 0;
++        ref.ayuFakeId = 0;
++        ref.entityCreateDate = (int) T0;
++        ref.editDate = 0;
++        ref.documentId = 555L;
++        ref.photoId = 0;
++        ref.dcId = 2;
++        ref.blobId = null;
++        ref.state = AliGramEligibility.STATE_ENQUEUED;
++        ref.expectedFileName = "f" + messageId + ".mp4";
++        ref.expectedSize = 4096L;
++        ref.attempts = 0;
++        ref.source = "INGEST";
++        ref.updatedAt = T0;
++        return ref;
++    }
++
++    private static DeferredDelete newDeferred(int accountId, long refId, String path) {
++        DeferredDelete row = new DeferredDelete();
++        row.accountId = accountId;
++        row.refId = refId;
++        row.absolutePath = path;
++        row.sizeAtPin = 4096L;
++        row.mtimeAtPin = T0;
++        row.requestedBy = "DELETE";
++        row.cancelDeferred = false;
++        row.state = "PENDING";
++        row.createdAt = T0;
++        return row;
++    }
++
++    // ------------------------------------------------------------------
++    // deleteByAccountAndDialog: dialog isolation (same account).
++    // ------------------------------------------------------------------
++
++    @Test
++    public void deleteByAccountAndDialog_touchesOnlyThatDialog() throws Exception {
++        long refA = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long refB = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_B, 21)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refB, "/cache/b.mp4"));
++        });
++
++        onDbVoid(() -> db.deferredDeleteDao().deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A));
++
++        List<DeferredDelete> pending = onDb(() -> db.deferredDeleteDao().getAllPending());
++        assertEquals(1, pending.size());
++        assertEquals(refB, pending.get(0).refId);
++        assertEquals("/cache/b.mp4", pending.get(0).absolutePath);
++    }
++
++    // ------------------------------------------------------------------
++    // deleteByAccountAndDialog: account isolation (same dialog id).
++    // ------------------------------------------------------------------
++
++    @Test
++    public void deleteByAccountAndDialog_touchesOnlyThatAccount() throws Exception {
++        long ref0 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long ref1 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_1, ACCOUNT_1, DIALOG_A, 11)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, ref0, "/cache/a0.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_1, ref1, "/cache/a1.mp4"));
++        });
++
++        onDbVoid(() -> db.deferredDeleteDao().deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A));
++
++        List<DeferredDelete> pending = onDb(() -> db.deferredDeleteDao().getAllPending());
++        assertEquals(1, pending.size());
++        assertEquals(ACCOUNT_1, pending.get(0).accountId);
++        assertEquals(ref1, pending.get(0).refId);
++    }
++
++    // ------------------------------------------------------------------
++    // deleteByAccountAndDialog: refId == 0 rows are never matched.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void deleteByAccountAndDialog_neverMatchesUnattributedRows() throws Exception {
++        long refA = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a.mp4"));
++            // Unattributed row (Layer-2 guard recorded it with no live ref).
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, 0, "/cache/orphan.mp4"));
++        });
++
++        onDbVoid(() -> db.deferredDeleteDao().deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A));
++
++        List<DeferredDelete> pending = onDb(() -> db.deferredDeleteDao().getAllPending());
++        assertEquals(1, pending.size());
++        assertEquals(0L, pending.get(0).refId);
++        assertEquals("/cache/orphan.mp4", pending.get(0).absolutePath);
++    }
++
++    // ------------------------------------------------------------------
++    // getPendingForDialog: dialog-scoped reads, PENDING only.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void getPendingForDialog_returnsOnlyThatDialogPendingRows() throws Exception {
++        long refA = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long refB = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_B, 21)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refB, "/cache/b.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a-done.mp4"));
++            // Room does not write the generated id back onto the passed
++            // entity, so resolve the row through a query before marking it.
++            DeferredDelete doneRow = db.deferredDeleteDao()
++                    .getPendingForPath(ACCOUNT_0, "/cache/a-done.mp4").get(0);
++            db.deferredDeleteDao().setState(doneRow.id, "DONE");
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, 0, "/cache/orphan.mp4"));
++        });
++
++        List<DeferredDelete> forA = onDb(() -> db.deferredDeleteDao().getPendingForDialog(ACCOUNT_0, DIALOG_A));
++        assertEquals(1, forA.size());
++        assertEquals("/cache/a.mp4", forA.get(0).absolutePath);
++
++        List<DeferredDelete> forB = onDb(() -> db.deferredDeleteDao().getPendingForDialog(ACCOUNT_0, DIALOG_B));
++        assertEquals(1, forB.size());
++        assertEquals("/cache/b.mp4", forB.get(0).absolutePath);
++    }
++
++    // ------------------------------------------------------------------
++    // getPendingForRef(account, refId): account-scoped reads.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void getPendingForRef_accountScoped() throws Exception {
++        long ref0 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long ref1 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_1, ACCOUNT_1, DIALOG_A, 11)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, ref0, "/cache/a0.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_1, ref1, "/cache/a1.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, 0, "/cache/a0-orphan.mp4"));
++        });
++        assertEquals(1, onDb(() -> db.deferredDeleteDao().getPendingForRef(ACCOUNT_0, ref0)).size());
++        assertEquals(1, onDb(() -> db.deferredDeleteDao().getPendingForRef(ACCOUNT_1, ref1)).size());
++        // Cross-account lookup finds nothing, even though the refId exists.
++        assertTrue(onDb(() -> db.deferredDeleteDao().getPendingForRef(ACCOUNT_1, ref0)).isEmpty());
++        assertTrue(onDb(() -> db.deferredDeleteDao().getPendingForRef(ACCOUNT_0, ref1)).isEmpty());
++        // NOTE — the DAO does return unattributed rows for refId 0 (they
++        // match accountId + refId + PENDING literally). The protection for
++        // them is NOT in this query: it is the early return for refId == 0
++        // in AliGramPreservation.releaseDeferredDeletesForRef, which must
++        // never be called with 0. The DAO-level guarantee is only that a
++        // foreign refId can never match (above).
++        assertEquals(1, onDb(() -> db.deferredDeleteDao().getPendingForRef(ACCOUNT_0, 0)).size());
++    }
++
++    // ------------------------------------------------------------------
++    // deleteForRef: exactly one ref's rows.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void deleteForRef_deletesOnlyThatRefRows() throws Exception {
++        long refA = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long refB = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_B, 21)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a1.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refA, "/cache/a2.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, refB, "/cache/b.mp4"));
++        });
++
++        onDbVoid(() -> db.deferredDeleteDao().deleteForRef(refA));
++
++        List<DeferredDelete> pending = onDb(() -> db.deferredDeleteDao().getAllPending());
++        assertEquals(1, pending.size());
++        assertEquals(refB, pending.get(0).refId);
++    }
++
++    // ------------------------------------------------------------------
++    // getPendingForAccount: account-scoped reads (startup sweep input).
++    // ------------------------------------------------------------------
++
++    @Test
++    public void getPendingForAccount_returnsOnlyThatAccountRows() throws Exception {
++        long ref0 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 11)));
++        long ref1 = onDb(() -> db.preservedRefDao().insertRef(newRef(USER_1, ACCOUNT_1, DIALOG_A, 11)));
++        onDbVoid(() -> {
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, ref0, "/cache/a0.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_1, ref1, "/cache/a1.mp4"));
++            db.deferredDeleteDao().insert(newDeferred(ACCOUNT_1, 0, "/cache/a1-orphan.mp4"));
++        });
++
++        assertEquals(1, onDb(() -> db.deferredDeleteDao().getPendingForAccount(ACCOUNT_0)).size());
++        assertEquals(2, onDb(() -> db.deferredDeleteDao().getPendingForAccount(ACCOUNT_1)).size());
++    }
++}
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+index 82b995a2e..cec5e52d5 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+@@ -54,20 +54,14 @@ import java.util.concurrent.atomic.AtomicReference;
+  * <p>Determinism: fixed ids, fixed timestamps ({@code T0}), no wall-clock
+  * or random dependence. A fresh in-memory DB is built per test.
+  *
+- * <p>Assumed DAO methods (do NOT exist yet — see the scenario-8 test and
+- * the report): {@code DeferredDeleteDao.deleteByAccountAndDialog(int,
+- * long)} and, equivalently, {@code deleteForRef(long)}. {@link DeferredDelete}
+- * carries no {@code dialogId} column, so a correct dialog-scoped delete
+- * must resolve the dialog via {@code refId -> PreservedRef.dialogId}
+- * (e.g. {@code DELETE ... WHERE accountId = :accountId AND refId IN
+- * (SELECT refId FROM PreservedRef WHERE accountId = :accountId AND
+- * dialogId = :dialogId)}). Until the sibling fix lands, the dialog-isolation
+- * tests below exercise the CORRECT scoping with the primitives that DO
+- * exist ({@code getPendingForRef} + {@code setState} + {@code deleteDone}),
+- * and deliberately do NOT call the current account-wide
+- * {@code deleteForAccount} for a dialog-scoped cleanup. If the assumed
+- * method lands, the scenario-8 test should be switched to call it
+- * directly (the assertions stay the same).
++ * <p>Dialog-scoped deferred cleanup uses the real DAO primitive
++ * {@code DeferredDeleteDao.deleteByAccountAndDialog(int, long)} (Phase
++ * 3.1 fix): it resolves the dialog through
++ * {@code refId -> PreservedRef.dialogId} because {@link DeferredDelete}
++ * carries no {@code dialogId} column, so rows with {@code refId == 0}
++ * are never matched and rows of other dialogs/accounts survive. See the
++ * scenario-8 test, which calls it directly. The per-ref equivalent
++ * {@code deleteForRef(long)} also exists.
+  */
+ @RunWith(RobolectricTestRunner.class)
+ @Config(sdk = 36) // app targetSdk; within Robolectric 4.17's supported 23..37 range
+@@ -701,15 +695,12 @@ public class AliGramRoomIntegrationTest {
+     // ------------------------------------------------------------------
+     // Scenario 8 — multiple dialogs remain isolated.
+     //
+-    // ASSUMED (not yet existing) DAO method:
+-    //   DeferredDeleteDao.deleteByAccountAndDialog(int accountId, long dialogId)
+-    // DeferredDelete has no dialogId column, so that method must resolve
+-    // the dialog through refId -> PreservedRef.dialogId. Until it lands,
+-    // this test performs the dialog-scoped deferred cleanup with the
+-    // primitives that DO exist (getPendingForRef + setState + deleteDone)
+-    // and asserts the same isolation. It deliberately does NOT call the
+-    // current account-wide deleteForAccount() for a dialog cleanup — that
+-    // call is the Phase 3.1 critical bug (clearPreservedForDialog /
++    // Dialog-scoped deferred cleanup uses the real DAO primitive
++    // DeferredDeleteDao.deleteByAccountAndDialog(int, long) (Phase 3.1
++    // fix): it resolves the dialog through refId -> PreservedRef.dialogId,
++    // because DeferredDelete has no dialogId column. It deliberately does
++    // NOT call the account-wide deleteForAccount() for a dialog cleanup —
++    // that call was the Phase 3.1 critical bug (clearPreservedForDialog /
+     // onDialogDeleted delete deferred rows account-wide).
+     // ------------------------------------------------------------------
+ 
+@@ -730,20 +721,18 @@ public class AliGramRoomIntegrationTest {
+         assertEquals(1, (int) onDb(() -> db.preservedRefDao().getRefsForDialog(USER_0, DIALOG_A)).size());
+         assertEquals(1, (int) onDb(() -> db.preservedRefDao().getRefsForDialog(USER_0, DIALOG_B)).size());
+ 
+-        // Dialog-scoped cleanup of dialog A only: drop its refs (with
+-        // refcount decrement) and resolve its deferred rows to DONE, then
+-        // sweep the blobs that reached refcount 0 (as production
+-        // clearPreservedForDialog does after dropping the refs).
+-        // TODO(sibling-fix): replace the deferred loop with
+-        //   deferredDao.deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A)
+-        // once that method exists; the assertions below stay unchanged.
++        // Dialog-scoped cleanup of dialog A only: delete its deferred rows
++        // with the dialog-scoped DAO primitive, drop its refs (with
++        // refcount decrement), then sweep the blobs that reached refcount 0
++        // (as production clearPreservedForDialog does after dropping the
++        // refs). The assertions below are unchanged from the pre-fix
++        // version, which modelled the same scoping with getPendingForRef +
++        // setState + deleteDone.
+         onDbVoid(() -> {
+             PreservedRefDao refDao = db.preservedRefDao();
+             DeferredDeleteDao deferredDao = db.deferredDeleteDao();
++            deferredDao.deleteByAccountAndDialog(ACCOUNT_0, DIALOG_A);
+             for (PreservedRef ref : refDao.getRefsForDialog(USER_0, DIALOG_A)) {
+-                for (DeferredDelete row : deferredDao.getPendingForRef(ref.refId)) {
+-                    deferredDao.setState(row.id, "DONE");
+-                }
+                 dropRefAndDecrement(ref);
+             }
+             deferredDao.deleteDone();
+-- 
+2.43.0
+

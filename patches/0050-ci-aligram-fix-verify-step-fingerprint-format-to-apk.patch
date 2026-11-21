@@ -1,0 +1,26 @@
+From 7910c557f8191c22f8760e7a616e2ef65f998636 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 17:39:17 +0300
+Subject: [PATCH 50/67] ci(aligram): fix verify-step fingerprint format to
+ apksigner lowercase no-colon output
+
+---
+ .github/workflows/aligram-build.yml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/aligram-build.yml b/.github/workflows/aligram-build.yml
+index dc23dea30..b0b044e29 100644
+--- a/.github/workflows/aligram-build.yml
++++ b/.github/workflows/aligram-build.yml
+@@ -133,7 +133,7 @@ jobs:
+           APK_FILE=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk' | head -n 1)
+           echo "APK: $APK_FILE"
+           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK_FILE" | tee /tmp/apksigner.txt
+-          grep -q "07:16:09:FD:4A:FA:A1:D5:CE:DA:8D:A2:0F:8B:EA:0D:40:4D:41:E3:2B:09:34:44:8C:3F:8B:91:08:A3:FD:88" /tmp/apksigner.txt
++          grep -q "071609fd4afaa1d5ceda8da20f8bea0d404d41e32b0934448c3f8b9108a3fd88" /tmp/apksigner.txt
+           echo "OK: APK signed with AliGram release key."
+           "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK_FILE" | grep -E "package: name='app.aligram' versionCode='1261'" 
+           echo "OK: package app.aligram, versionCode 1261."
+-- 
+2.43.0
+

@@ -1,0 +1,67 @@
+0001-Add-AliGram-baseline-build-workflow-Phase-3-Step-1-b.patch | Add AliGram baseline build workflow (Phase 3 Step 1 build gate)
+0002-feat-aligram-core-preservation-package-Room-DB-v1-co.patch | feat(aligram): core preservation package — Room DB v1, copy-only helper, controller
+0003-feat-aligram-wire-preservation-hooks-H-I-H-C-H-E-H-D.patch | feat(aligram): wire preservation hooks (H-I/H-C/H-E/H-D, deferred-delete guards)
+0004-feat-aligram-preservation-UI-chat-toggle-settings-ro.patch | feat(aligram): preservation UI — chat toggle, settings row, render guard, About
+0005-chore-aligram-distinct-AliGram-branding-BRANDING.md.patch | chore(aligram): distinct AliGram branding (BRANDING.md)
+0006-test-aligram-deterministic-JVM-unit-tests-run-them-i.patch | test(aligram): deterministic JVM unit tests + run them in CI
+0007-fix-aligram-build-without-a-Firebase-project-for-app.patch | fix(aligram): build without a Firebase project for app.aligram
+0008-fix-aligram-annotate-PreservedBlob.blobId-NonNull-Ro.patch | fix(aligram): annotate PreservedBlob.blobId @NonNull (Room primary key)
+0009-fix-aligram-missing-pendingLoads-field-ApplicationLo.patch | fix(aligram): missing pendingLoads field, ApplicationLoader import, probe scope
+0010-test-aligram-real-Room-integration-tests-refcount-or.patch | test(aligram): real Room integration tests — refcount, orphans, deferred delete, isolation, restart reconcile
+0011-fix-aligram-scope-DeferredDelete-deletes-to-the-exac.patch | fix(aligram): scope DeferredDelete deletes to the exact (account, dialog) — D-06
+0012-fix-aligram-R-7-remove-the-Connected-only-stamp-fall.patch | fix(aligram): R-7 — remove the Connected-only stamp fallback; harden the server-round signal; remove dead D-08 trigger
+0013-fix-aligram-D-01-run-H-C-completion-failure-hooks-on.patch | fix(aligram): D-01 — run H-C completion/failure hooks on copyQueue, not the UI thread
+0014-fix-aligram-D-03-purgeAccount-deletes-refs-by-accoun.patch | fix(aligram): D-03 — purgeAccount deletes refs by accountId, not userId
+0015-fix-aligram-D-04-deferred-delete-release-can-never-f.patch | fix(aligram): D-04 — deferred-delete release can never fire for 0,0 pin values
+0016-fix-aligram-D-02-guard-cancelDownloading-against-can.patch | fix(aligram): D-02 — guard cancelDownloading against cancelling pinned downloads
+0017-fix-aligram-D-14-watchdog-reconciles-the-operation-t.patch | fix(aligram): D-14 — watchdog reconciles the operation temp file (completed-preload swallow)
+0018-fix-aligram-D-05-scope-blob-identity-by-account.patch | fix(aligram): D-05 — scope blob identity by account
+0019-fix-aligram-D-07-anchor-loss-ref-drops-release-their.patch | fix(aligram): D-07 — anchor-loss ref drops release their deferred deletes
+0020-fix-aligram-D-09-stale-pending-blobs-accepted-unveri.patch | fix(aligram): D-09 — stale pending blobs accepted unverified; orphan-blob sweep incomplete
+0021-fix-aligram-D-10-re-read-the-ref-before-bind-D-09-2-.patch | fix(aligram): D-10 — re-read the ref before bind; D-09(2) transactional-bind gap
+0022-fix-aligram-D-11-startup-PINNED-with-no-source-goes-.patch | fix(aligram): D-11 — startup PINNED with no source goes straight to UNAVAILABLE
+0023-fix-aligram-D-12-synthesise-DeferredDelete-rows-from.patch | fix(aligram): D-12 — synthesise DeferredDelete rows from pendingDeletePaths at startup
+0024-test-aligram-D-13-production-constant-H-9-test-Phase.patch | test(aligram): D-13 — production-constant H-9 test + Phase 3.1 DAO regression tests
+0025-fix-aligram-add-Robolectric-add-opens-jvmArgs-for-JD.patch | fix(aligram): add Robolectric --add-opens jvmArgs for JDK 17+ unit tests
+0026-fix-aligram-run-refCountOf-query-on-the-DB-worker-th.patch | fix(aligram): run refCountOf query on the DB worker thread
+0027-fix-aligram-O-01-preservation-dialog-shows-one-body-.patch | fix(aligram): O-01 — preservation dialog shows one body text; PENDING gets pending notice only + 'Cancel activation' button
+0028-fix-aligram-O-02-launcher-icon-preview-uses-the-real.patch | fix(aligram): O-02 — launcher icon preview uses the real adaptive-icon layers
+0029-fix-aligram-O-03-StatFs-failure-log-says-the-copy-pr.patch | fix(aligram): O-03 — StatFs-failure log says the copy proceeds unguarded
+0030-fix-aligram-O-04-remove-leftover-Nagram-launcher-not.patch | fix(aligram): O-04 — remove leftover Nagram launcher/notification assets and links
+0031-test-aligram-claimJobsForFile-atomicity-scenarios-11.patch | test(aligram): claimJobsForFile atomicity scenarios 11-13 + T-H9-3 doc reword (Phase 3.2)
+0032-ci-aligram-Crashlytics-mapping-upload-guard-Room-gen.patch | ci(aligram): Crashlytics mapping-upload guard + Room generated-sources artifact (Phase 3.2)
+0033-fix-aligram-claimJobsForFile-atomicity-transaction-v.patch | fix(aligram): claimJobsForFile atomicity — transaction via caller runInTransaction (Phase 3.2)
+0034-test-aligram-scenario-12b-trigger-abort-transaction-.patch | test(aligram): scenario 12b trigger-abort transaction probe; CI: upload Room generated sources even on red runs
+0035-fix-aligram-import-AtomicBoolean-in-AliGramRoomInteg.patch | fix(aligram): import AtomicBoolean in AliGramRoomIntegrationTest
+0036-test-aligram-scenarios-12c-12d-isolate-why-scenario-.patch | test(aligram): scenarios 12c/12d isolate why scenario 12 still fails; correct 12b comment
+0037-test-aligram-scenario-12e-does-an-outer-transaction-.patch | test(aligram): scenario 12e — does an outer transaction save the trigger-aborted claim?
+0038-test-aligram-rewrite-scenario-12-in-the-nested-form-.patch | test(aligram): rewrite scenario 12 in the nested form; fold 12e in; fix w2 expectation
+0039-feat-aligram-FCM-via-CI-secret-R1-re-apply-google-se.patch | feat(aligram): FCM via CI secret (R1) — re-apply google-services plugin
+0040-feat-aligram-adjustable-preservation-limits-settings.patch | feat(aligram): adjustable preservation limits (settings UI)
+0041-fix-aligram-write-google-services.json-from-CI-secre.patch | fix(aligram): write google-services.json from CI secret in pr.yml
+0042-feat-aligram-dominance-policy-remove-Archive-gate-me.patch | feat(aligram): dominance policy — remove Archive gate, megagroup post rule, retry policy
+0043-feat-aligram-Preserve-Media-dominance-retry-until-su.patch | feat(aligram): Preserve Media dominance + retry-until-success (wiring)
+0044-feat-aligram-dominance-wiring-drop-Archive-post-plum.patch | feat(aligram): dominance wiring — drop Archive/post plumbing from putMessages hook
+0045-test-aligram-update-eligibility-tests-for-new-canIng.patch | test(aligram): update eligibility tests for new canIngest signature; archived preserves
+0046-test-aligram-update-activation-tests-for-new-canInge.patch | test(aligram): update activation tests for new canIngest signature
+0047-test-aligram-dominance-tests-archived-muted-megagrou.patch | test(aligram): dominance tests — archived/muted/megagroup/M-T-off preserve, sweep, PENDING window
+0048-build-aligram-versionCode-1260-1261-CI-signing-secre.patch | build(aligram): versionCode 1260 -> 1261, CI signing secrets take precedence for release key
+0049-ci-aligram-sign-debug-APK-with-AliGram-release-key-f.patch | ci(aligram): sign debug APK with AliGram release key from CI secrets, verify fingerprint + versionCode 1261
+0050-ci-aligram-fix-verify-step-fingerprint-format-to-apk.patch | ci(aligram): fix verify-step fingerprint format to apksigner lowercase no-colon output
+0051-feat-aligram-hidden-folder-core-salted-code-hash-set.patch | feat(aligram): hidden-folder core — salted code hash, ## setup, lock/unlock, 1h auto-lock, hidden-dialog cache
+0052-test-aligram-hidden-folder-core-tests-setup-hash-onl.patch | test(aligram): hidden-folder core tests — setup, hash-only, unlock, expiry, membership, stats, debounce (20 tests)
+0053-feat-aligram-hidden-folders-filter-hidden-dialogs-in.patch | feat(aligram): hidden folders — filter hidden dialogs in sortDialogs, hidden-dialog cache provider, prune orphans
+0054-feat-aligram-hidden-folders-suppress-notifications-b.patch | feat(aligram): hidden folders — suppress notifications/badges for hidden dialogs while locked
+0055-feat-aligram-hidden-folders-filter-hidden-dialogs-fr.patch | feat(aligram): hidden folders — filter hidden dialogs from dialog list (copy, live list untouched)
+0056-feat-aligram-hidden-folders-drop-hidden-dialogs-from.patch | feat(aligram): hidden folders — drop hidden dialogs from local/recent/global search results
+0057-feat-aligram-hidden-folders-filter-hidden-dialogs-in.patch | feat(aligram): hidden folders — filter hidden dialogs in server/phone search merge
+0058-feat-aligram-hidden-folders-guard-opening-hidden-cha.patch | feat(aligram): hidden folders — guard opening hidden chats while locked, auto-lock pop, preserved-dialog guard
+0059-feat-aligram-hidden-folders-skip-hidden-filter-tabs-.patch | feat(aligram): hidden folders — skip hidden filter tabs while locked
+0060-feat-aligram-hidden-folders-filter-hidden-dialogs-fr.patch | feat(aligram): hidden folders — filter hidden dialogs from share sheet and share search
+0061-feat-aligram-hidden-folders-search-box-code-intercep.patch | feat(aligram): hidden folders — search-box code intercept, tab filtering, long-press Hide/Unhide, unread subtraction
+0062-feat-aligram-hidden-folders-skip-hidden-filters-in-f.patch | feat(aligram): hidden folders — skip hidden filters in folder edit list, fix swapElements identity mapping
+0063-feat-aligram-hidden-folders-re-lock-on-app-backgroun.patch | feat(aligram): hidden folders — re-lock on app background (onStop), auto-lock expiry handling
+0064-feat-aligram-hidden-folders-filter-hidden-dialogs-fr.patch | feat(aligram): hidden folders — filter hidden dialogs from stories strip
+0065-feat-aligram-hidden-folders-filter-hidden-dialogs-fr.patch | feat(aligram): hidden folders — filter hidden dialogs from preserved-media stats while locked
+0066-fix-aligram-move-stray-Override-from-auto-lock-field.patch | fix(aligram): move stray @Override from auto-lock field back to onResume (compile error)
+0067-fix-aligram-capture-final-copy-of-stats-for-lambda-i.patch | fix(aligram): capture final copy of stats for lambda in loadAliGramPreservedSize (not effectively final)

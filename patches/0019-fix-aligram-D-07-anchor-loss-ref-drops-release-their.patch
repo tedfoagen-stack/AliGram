@@ -1,0 +1,70 @@
+From b6f25cc70e2e61c6258cb1fe59814fec47d77ffa Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:00:34 +0000
+Subject: [PATCH 19/67] =?UTF-8?q?fix(aligram):=20D-07=20=E2=80=94=20anchor?=
+ =?UTF-8?q?-loss=20ref=20drops=20release=20their=20deferred=20deletes?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: dropRefAndDecrement, terminateLiveForDelete, onDialogDeleted,
+onDialogClearedExcept and onChannelHistoryCleared never called
+releaseDeferredDeletesForRef — only the startup sweep did — so a file
+Telegram asked to delete stayed cached until the next restart. The
+sibling D-06 fix already added per-ref releases in the four dialog
+flows, but terminateLiveForDelete (ANCHOR_LOST drops from the delete
+event / mark-path sweep) bypasses the funnel entirely. Fix: call
+releaseDeferredDeletesForRef at the end of dropRefAndDecrement (the
+single funnel) AND in terminateLiveForDelete (which inlines its own
+delete). Idempotency verified: release only selects PENDING rows for
+the ref (getPendingForRef) and marks them DONE after handling, so the
+dialog flows' existing explicit calls after dropRefAndDecrement now
+find nothing PENDING and no-op — no double release, no double file
+delete. The release re-checks active pins per path, so a file another
+ref still pins survives.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 6a4025059..dad57651d 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -2288,6 +2288,14 @@ public final class AliGramPreservation {
+             dao.deleteRefById(live.refId);
+             mirrorRemoveForRef(live);
+             forgetResolvedFilesForRef(live);
++            // Phase 3.1 (D-07): this path inlines its own delete instead
++            // of going through dropRefAndDecrement, so it needs the
++            // release explicitly — otherwise a LIVE job dropped
++            // ANCHOR_LOST (delete-event with the delete axis off, or the
++            // mark-path sweep) leaves its deferred deletes for the
++            // startup sweep only. Same idempotency as the funnel: only
++            // PENDING rows for this ref, active pins re-checked.
++            releaseDeferredDeletesForRef(account, live.refId);
+             FileLog.d(TAG + ": LIVE ref dropped ANCHOR_LOST for message " + messageId + " in " + dialogId);
+             sweepRefcountZeroBlobs(account);
+         } catch (Throwable e) {
+@@ -2356,6 +2364,19 @@ public final class AliGramPreservation {
+             dao.deleteRefById(ref.refId);
+             mirrorRemoveForRef(ref);
+             forgetResolvedFilesForRef(ref);
++            // Phase 3.1 (D-07): the single funnel for all anchor-loss
++            // drops — ending the pin releases this ref's deferred
++            // deletes now instead of leaving them for the startup sweep.
++            // Idempotent with the per-ref releases the four dialog flows
++            // (onDialogDeleted / onDialogClearedExcept /
++            // onChannelHistoryCleared / clearPreservedForDialog) already
++            // do after calling here: those find the rows DONE and no-op
++            // (release only touches PENDING rows, and the release
++            // re-checks active pins per path, so a file another ref
++            // still pins survives). Verified: the sibling D-06 fix added
++            // those per-ref releases; this funnel call makes the release
++            // happen for every drop path, including future callers.
++            releaseDeferredDeletesForRef(ref.accountId, ref.refId);
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": dropRefAndDecrement failed", e);
+         }
+-- 
+2.43.0
+

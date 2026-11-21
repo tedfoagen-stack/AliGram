@@ -1,0 +1,39 @@
+From 3762dc0b0633f6c5ef3572c3a22498c58de01276 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:39:06 +0000
+Subject: [PATCH 29/67] =?UTF-8?q?fix(aligram):=20O-03=20=E2=80=94=20StatFs?=
+ =?UTF-8?q?-failure=20log=20says=20the=20copy=20proceeds=20unguarded?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The old line ('StatFs failed, continuing without headroom check') did not
+state that the copy proceeds with NO headroom check at all. The log now
+says UNGUARDED explicitly, names the blob dir and source file and the
+failure cause, and notes the mid-copy ENOSPC handling is the only
+remaining guard. Fail-safe behaviour unchanged: the copy still proceeds.
+---
+ .../java/com/radolyn/ayugram/aligram/AliGramFileCopy.java  | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
+index 490d498b8..473658232 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
+@@ -112,7 +112,12 @@ public final class AliGramFileCopy {
+                 return new CopyResult(false, null, null, null, 0, AliGramEligibility.REASON_NO_SPACE);
+             }
+         } catch (Throwable e) {
+-            FileLog.e("AliGram: StatFs failed, continuing without headroom check", e);
++            // O-03 (Phase 3.2): the fail-safe itself is unchanged — the copy
++            // still proceeds — but the log must say so explicitly: there is
++            // now NO headroom check, and the mid-copy ENOSPC handling is
++            // the only remaining guard. Context (blob dir, source file,
++            // failure cause) is included so the line is actionable.
++            FileLog.e("AliGram: StatFs failed for blob dir " + dir.getAbsolutePath() + " while copying " + source.getAbsolutePath() + " (" + e + ") — continuing UNGUARDED with no headroom check; the mid-copy ENOSPC handling is the only remaining guard", e);
+         }
+ 
+         File tempFile = new File(dir, finalFileName + ".tmp-" + refId);
+-- 
+2.43.0
+

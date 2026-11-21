@@ -1,0 +1,184 @@
+From 4e7a2a9602812b19e75b3b2d519d422c00818055 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:59:45 +0000
+Subject: [PATCH 16/67] =?UTF-8?q?fix(aligram):=20D-02=20=E2=80=94=20guard?=
+ =?UTF-8?q?=20cancelDownloading=20against=20cancelling=20pinned=20download?=
+ =?UTF-8?q?s?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: deleteFromDownloadQueue (MessagesStorage.java:11183-11210)
+posts cancelDownloading on the UI thread, and cancelDownloading had no
+pin check at all — only FileLoader.cancelLoadFiles (plural) has the
+isFileNamePinned guard, and this path never goes through it. An edit
+of a message whose old media is still downloading therefore cancelled
+that download, stranding the freeze copy. Fix: skip any pair whose
+resolved attach file name is pinned (mirror-only lookup, UI-safe),
+mirroring the cancelLoadFiles guard. The deferred cancel is already
+recorded as a DeferredDelete row by Layer 1 and fires at release.
+Supporting fixes: mirrorRemoveForRef now only clears the shared
+file-name mirror when no other active ref still names the file (new
+PreservedRefDao.getActiveRefsForFileName; fan-out LIVE + EDIT pin on
+one download must keep the name pinned until both are done); purge
+and settings-clear reorder mirror cleanup to run after the bulk row
+delete, so the DAO re-check does not see doomed rows as still active.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 52 +++++++++++++++++--
+ .../ayugram/aligram/PreservedRefDao.java      | 12 +++++
+ .../messenger/DownloadController.java         | 16 ++++++
+ 3 files changed, 75 insertions(+), 5 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index faa51827f..5a79f9ebf 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -617,7 +617,27 @@ public final class AliGramPreservation {
+                 }
+             }
+             if (ref.expectedFileName != null && !ref.expectedFileName.isEmpty()) {
+-                pinnedNameMirror.remove(ref.expectedFileName);
++                // Phase 3.1 (D-02): the name mirror is shared by the fan-out
++                // refs for one file (LIVE + EDIT pin on the same download),
++                // so only clear it when NO other active ref still names the
++                // file — otherwise the cancelDownloading pin guard would
++                // miss a still-pinned freeze copy. Mirrors the path branch
++                // above, which already re-checks the DAO.
++                boolean stillNeeded = false;
++                if (dao != null) {
++                    List<PreservedRef> active = dao.getActiveRefsForFileName(ref.accountId, ref.expectedFileName);
++                    if (active != null) {
++                        for (PreservedRef other : active) {
++                            if (other.refId != ref.refId) {
++                                stillNeeded = true;
++                                break;
++                            }
++                        }
++                    }
++                }
++                if (!stillNeeded) {
++                    pinnedNameMirror.remove(ref.expectedFileName);
++                }
+             }
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": mirrorRemoveForRef failed", e);
+@@ -2685,10 +2705,17 @@ public final class AliGramPreservation {
+                         PreservedRefDao dao = AliGramData.refDao();
+                         DeferredDeleteDao deferredDao = AliGramData.deferredDao();
+                         if (dao != null) {
++                            // Phase 3.1 (D-02): collect the rows first,
++                            // delete them, and only THEN clean the
++                            // mirrors — mirrorRemoveForRef re-checks the
++                            // DAO for other active refs, so cleaning
++                            // before the delete would see the doomed rows
++                            // as still active and leave stale-pinned
++                            // entries behind.
++                            ArrayList<PreservedRef> accountRefs = new ArrayList<>();
+                             for (PreservedRef ref : dao.getAllRefs()) {
+                                 if (ref.accountId == account) {
+-                                    forgetResolvedFilesForRef(ref);
+-                                    mirrorRemoveForRef(ref);
++                                    accountRefs.add(ref);
+                                 }
+                             }
+                             // Phase 3.1 (D-03): key the delete on the
+@@ -2696,6 +2723,10 @@ public final class AliGramPreservation {
+                             // purgeAccount — the user id is not stable
+                             // across account lifecycle events).
+                             dao.deleteRefsForAccountId(account);
++                            for (PreservedRef ref : accountRefs) {
++                                forgetResolvedFilesForRef(ref);
++                                mirrorRemoveForRef(ref);
++                            }
+                         }
+                         if (deferredDao != null) {
+                             // Account-wide ON PURPOSE here (settings clear-all):
+@@ -2850,10 +2881,17 @@ public final class AliGramPreservation {
+                         PreservedRefDao dao = AliGramData.refDao();
+                         DeferredDeleteDao deferredDao = AliGramData.deferredDao();
+                         if (dao != null) {
++                            // Phase 3.1 (D-02): collect the rows first,
++                            // delete them, and only THEN clean the
++                            // mirrors — mirrorRemoveForRef re-checks the
++                            // DAO for other active refs, so cleaning
++                            // before the delete would see the doomed rows
++                            // as still active and leave stale-pinned
++                            // entries behind.
++                            ArrayList<PreservedRef> accountRefs = new ArrayList<>();
+                             for (PreservedRef ref : dao.getAllRefs()) {
+                                 if (ref.accountId == account) {
+-                                    forgetResolvedFilesForRef(ref);
+-                                    mirrorRemoveForRef(ref);
++                                    accountRefs.add(ref);
+                                 }
+                             }
+                             // Phase 3.1 (D-03, RELEASE-BLOCKING): delete
+@@ -2873,6 +2911,10 @@ public final class AliGramPreservation {
+                             // subtree/prefs, and the next startup's
+                             // split-brain check marks them UNAVAILABLE.
+                             dao.deleteRefsForAccountId(account);
++                            for (PreservedRef ref : accountRefs) {
++                                forgetResolvedFilesForRef(ref);
++                                mirrorRemoveForRef(ref);
++                            }
+                         }
+                         if (deferredDao != null) {
+                             // Account-wide ON PURPOSE here (account removal):
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+index 2f542beca..7d686c44c 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+@@ -49,6 +49,18 @@ public interface PreservedRefDao {
+     @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId AND expectedFileName = :expectedFileName AND state IN ('ENQUEUED', 'DOWNLOADING', 'PINNED')")
+     List<PreservedRef> getWaitingJobsForFile(int accountId, String expectedFileName);
+ 
++    /**
++     * Phase 3.1 (D-02): active refs (any pin state, incl. COPYING) for
++     * one attach file name. The name mirror
++     * ({@code AliGramPreservation.pinnedNameMirror}) is keyed by file
++     * name and shared by the fan-out refs for one file, so it must only
++     * be cleared when NO active ref still names the file — otherwise
++     * the {@code cancelDownloading} pin guard would miss a still-pinned
++     * freeze copy.
++     */
++    @Query("SELECT * FROM PreservedRef WHERE accountId = :accountId AND expectedFileName = :expectedFileName AND state IN ('ENQUEUED', 'DOWNLOADING', 'PINNED', 'COPYING')")
++    List<PreservedRef> getActiveRefsForFileName(int accountId, String expectedFileName);
++
+     /** Active pins covering one source path (Layer-1/Layer-2 guard + release check). */
+     @Query("SELECT * FROM PreservedRef WHERE sourcePath = :sourcePath AND state IN ('PINNED', 'COPYING', 'DOWNLOADING', 'ENQUEUED')")
+     List<PreservedRef> getActivePinsForPath(String sourcePath);
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java b/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
+index ad6e5cacc..7bbc3c222 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
+@@ -1140,11 +1140,27 @@ public class DownloadController extends BaseController implements NotificationCe
+             }
+             if (downloadObject.object instanceof TLRPC.Document) {
+                 TLRPC.Document document = (TLRPC.Document) downloadObject.object;
++                // --- AliGram hook (Phase 3.1, D-02): the deferred-cancel
++                // rule — never cancel a pinned file's in-flight download.
++                // deleteFromDownloadQueue feeds this path after an edit,
++                // bypassing the isFileNamePinned guard that
++                // FileLoader.cancelLoadFiles has; the mirror lookup is
++                // UI-thread-safe (no DAO). The cancel intent is already
++                // recorded as a DeferredDelete row by Layer 1 and fires
++                // at release time instead.
++                if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(document))) {
++                    continue;
++                }
+                 getFileLoader().cancelLoadFile(document, true);
+             } else if (downloadObject.object instanceof TLRPC.Photo) {
+                 TLRPC.Photo photo = (TLRPC.Photo) downloadObject.object;
+                 TLRPC.PhotoSize photoSize = FileLoader.getClosestPhotoSizeWithSize(photo.sizes, AndroidUtilities.getPhotoSize());
+                 if (photoSize != null) {
++                    // --- AliGram hook (Phase 3.1, D-02): same pin guard
++                    // as the Document branch above.
++                    if (AliGramPreservation.isFileNamePinned(FileLoader.getAttachFileName(photoSize))) {
++                        continue;
++                    }
+                     getFileLoader().cancelLoadFile(photoSize, true);
+                 }
+             }
+-- 
+2.43.0
+

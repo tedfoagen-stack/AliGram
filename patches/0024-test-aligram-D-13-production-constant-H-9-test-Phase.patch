@@ -1,0 +1,405 @@
+From bf78f1f22427b6f04c6f64d36cf5055d3e3e545a Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:01:53 +0000
+Subject: [PATCH 24/67] =?UTF-8?q?test(aligram):=20D-13=20=E2=80=94=20produ?=
+ =?UTF-8?q?ction-constant=20H-9=20test=20+=20Phase=203.1=20DAO=20regressio?=
+ =?UTF-8?q?n=20tests?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+D-13: the T-H9/T-R19 tests assert on local model helpers, not production
+code — and the model itself was WRONG: it assumed
+ChatActivity.MODE_QUICK_REPLIES == 2, but production says 5 (2 is
+MODE_PINNED). Production compares against the symbols everywhere, so
+the wrong value never changed runtime behaviour, but it proves the
+model tests cannot catch a renumbering. New AliGramPhase31PolicyTest
+(plain JUnit, no Robolectric) asserts the PRODUCTION constants
+(MODE_DEFAULT 0, MODE_SCHEDULED 1, MODE_PINNED 2, MODE_QUICK_REPLIES 5,
+all distinct — compile-time constants, so no Android class loads at
+runtime), the account-scoped blobIdFor overload (account 0 == legacy
+id; other accounts get an 'a<N>_' prefix), and the distinct
+NO_PIN_SOURCE reason. New AliGramPhase31DaoTest (Robolectric, real
+in-memory Room, same harness as the sibling scope test) proves the DAO
+contracts the fixes rest on: D-03 deleteRefsForAccountId deletes only
+that account (and deleteRefsForAccount(0) — the logout bug's key —
+deletes nothing); D-05 blob lookups are account-scoped for document
+and photo keys; D-04 refreshSizeMtimeForPath fills in a PENDING row's
+0,0 values and ignores DONE rows. No existing test file was edited.
+Controller wiring (purgeAccount, copyForRef, release paths) is not
+executable in this harness and stays verified by code review + CI.
+---
+ .../aligram/AliGramPhase31DaoTest.java        | 283 ++++++++++++++++++
+ .../aligram/AliGramPhase31PolicyTest.java     |  70 +++++
+ 2 files changed, 353 insertions(+)
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31DaoTest.java
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31PolicyTest.java
+
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31DaoTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31DaoTest.java
+new file mode 100644
+index 000000000..7ca0343d6
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31DaoTest.java
+@@ -0,0 +1,283 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import android.content.Context;
++
++import androidx.room.Room;
++import androidx.test.core.app.ApplicationProvider;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.robolectric.RobolectricTestRunner;
++import org.robolectric.annotation.Config;
++
++import java.util.concurrent.Callable;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * DAO-level regression tests for the Phase 3.1 audit fixes that are
++ * expressible against the REAL {@link AliGramDatabase} (in-memory) under
++ * Robolectric — the DAO contracts the controller fixes rest on:
++ *
++ * <ul>
++ *   <li>D-03: {@code deleteRefsForAccountId} deletes by the stable
++ *       account id (a purge keyed on user id 0 — the value
++ *       {@code performLogout} leaves behind — deletes nothing);</li>
++ *   <li>D-05: blob identity lookups are account-scoped (same media in
++ *       two accounts is two rows);</li>
++ *   <li>D-04: {@code refreshSizeMtimeForPath} fills in a PENDING
++ *       deferred row's 0,0 size/mtime on materialisation.</li>
++ * </ul>
++ *
++ * <p>Threading mirrors production (no {@code allowMainThreadQueries()}):
++ * every DAO call runs on a worker thread via {@link #onDb(Callable)}.
++ * The controller wiring itself (purgeAccount, copyForRef dedupe,
++ * releaseDeferredRow) is NOT executable in this harness — it needs
++ * UserConfig / FileLoader / the copy queue — and is verified by code
++ * review + the DAO contracts proven here.
++ */
++@RunWith(RobolectricTestRunner.class)
++@Config(sdk = 36)
++public class AliGramPhase31DaoTest {
++
++    private static final long USER_0 = 1000L;
++    private static final long USER_1 = 2000L;
++    private static final int ACCOUNT_0 = 0;
++    private static final int ACCOUNT_1 = 1;
++    private static final long DIALOG_A = -100111L;
++    private static final long T0 = 1_700_000_000L;
++
++    private static final String SHA_DOC = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
++    private static final String SHA_PHOTO = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
++
++    private AliGramDatabase db;
++    private ExecutorService dbExecutor;
++
++    @Before
++    public void setUp() {
++        dbExecutor = Executors.newSingleThreadExecutor();
++        Context ctx = ApplicationProvider.getApplicationContext();
++        db = Room.inMemoryDatabaseBuilder(ctx, AliGramDatabase.class).build();
++    }
++
++    @After
++    public void tearDown() throws Exception {
++        if (db != null) {
++            try {
++                onDb(() -> {
++                    db.close();
++                    return null;
++                });
++            } catch (Exception ignored) {
++            }
++            db = null;
++        }
++        if (dbExecutor != null) {
++            dbExecutor.shutdownNow();
++            dbExecutor.awaitTermination(10, TimeUnit.SECONDS);
++            dbExecutor = null;
++        }
++    }
++
++    private <T> T onDb(Callable<T> work) throws Exception {
++        Future<T> f = dbExecutor.submit(work);
++        return f.get(30, TimeUnit.SECONDS);
++    }
++
++    private void onDbVoid(Runnable work) throws Exception {
++        onDb(() -> {
++            work.run();
++            return null;
++        });
++    }
++
++    private static PreservedRef newRef(long userId, int accountId, long dialogId, int messageId) {
++        PreservedRef ref = new PreservedRef();
++        ref.userId = userId;
++        ref.accountId = accountId;
++        ref.dialogId = dialogId;
++        ref.messageId = messageId;
++        ref.role = "LIVE";
++        ref.revisionSeq = 0;
++        ref.ayuFakeId = 0;
++        ref.entityCreateDate = (int) T0;
++        ref.editDate = 0;
++        ref.documentId = 555L;
++        ref.photoId = 0;
++        ref.dcId = 2;
++        ref.blobId = null;
++        ref.state = AliGramEligibility.STATE_ENQUEUED;
++        ref.expectedFileName = "f" + messageId + ".mp4";
++        ref.expectedSize = 4096L;
++        ref.attempts = 0;
++        ref.source = "INGEST";
++        ref.updatedAt = T0;
++        return ref;
++    }
++
++    private static PreservedBlob newBlob(int accountId, String blobId, long documentId,
++                                         long photoId, String sha256, long size) {
++        PreservedBlob blob = new PreservedBlob();
++        blob.blobId = blobId;
++        blob.accountId = accountId;
++        blob.documentId = documentId;
++        blob.photoId = photoId;
++        blob.dcId = 2;
++        blob.size = size;
++        blob.sha256 = sha256;
++        blob.mimeType = "video/mp4";
++        blob.ext = "mp4";
++        blob.fileName = blobId + ".mp4";
++        blob.originalFileName = "clip.mp4";
++        blob.photoWidth = 0;
++        blob.photoHeight = 0;
++        blob.refCount = 0;
++        blob.createdAt = T0;
++        return blob;
++    }
++
++    private static DeferredDelete newDeferred(int accountId, long refId, String path) {
++        DeferredDelete row = new DeferredDelete();
++        row.accountId = accountId;
++        row.refId = refId;
++        row.absolutePath = path;
++        row.sizeAtPin = 0;
++        row.mtimeAtPin = 0;
++        row.requestedBy = "DELETE";
++        row.cancelDeferred = false;
++        row.state = "PENDING";
++        row.createdAt = T0;
++        return row;
++    }
++
++    // ------------------------------------------------------------------
++    // D-03 — deleteRefsForAccountId
++    // ------------------------------------------------------------------
++
++    @Test
++    public void d03_deleteByAccountIdDeletesOnlyThatAccount() throws Exception {
++        onDbVoid(() -> {
++            db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 1));
++            db.preservedRefDao().insertRef(newRef(USER_0, ACCOUNT_0, DIALOG_A, 2));
++            db.preservedRefDao().insertRef(newRef(USER_1, ACCOUNT_1, DIALOG_A, 1));
++        });
++        // The old buggy key: performLogout zeroes clientUserId before the
++        // purge hook, so deleteRefsForAccount(0) deleted nothing.
++        onDbVoid(() -> db.preservedRefDao().deleteRefsForAccount(0L));
++        assertEquals(3, onDb(() -> db.preservedRefDao().getAllRefs()).size());
++        // The fix: key on the stable account id.
++        onDbVoid(() -> db.preservedRefDao().deleteRefsForAccountId(ACCOUNT_0));
++        assertEquals(0, onDb(() -> db.preservedRefDao().getRefsForAccount(ACCOUNT_0)).size());
++        assertEquals(1, onDb(() -> db.preservedRefDao().getRefsForAccount(ACCOUNT_1)).size());
++        onDbVoid(() -> db.preservedRefDao().deleteRefsForAccountId(ACCOUNT_1));
++        assertTrue(onDb(() -> db.preservedRefDao().getAllRefs()).isEmpty());
++    }
++
++    // ------------------------------------------------------------------
++    // D-05 — account-scoped blob identity
++    // ------------------------------------------------------------------
++
++    @Test
++    public void d05_blobLookupsAreAccountScoped() throws Exception {
++        onDbVoid(() -> {
++            // Same media (same document key) in two accounts: two rows.
++            db.preservedBlobDao().insertBlob(newBlob(ACCOUNT_0, "d555_2_4096_aaaaaaaaaaaaaaaa",
++                    555L, 0L, SHA_DOC, 4096L));
++            db.preservedBlobDao().insertBlob(newBlob(ACCOUNT_1, "a1_d555_2_4096_aaaaaaaaaaaaaaaa",
++                    555L, 0L, SHA_DOC, 4096L));
++            // Same photo in two accounts: two rows.
++            db.preservedBlobDao().insertBlob(newBlob(ACCOUNT_0, "p777_2_2048_bbbbbbbbbbbbbbbb",
++                    0L, 777L, SHA_PHOTO, 2048L));
++            db.preservedBlobDao().insertBlob(newBlob(ACCOUNT_1, "a1_p777_2_2048_bbbbbbbbbbbbbbbb",
++                    0L, 777L, SHA_PHOTO, 2048L));
++        });
++        PreservedBlob doc0 = onDb(() -> db.preservedBlobDao()
++                .getByDocumentKey(ACCOUNT_0, 555L, 2, 4096L, SHA_DOC));
++        PreservedBlob doc1 = onDb(() -> db.preservedBlobDao()
++                .getByDocumentKey(ACCOUNT_1, 555L, 2, 4096L, SHA_DOC));
++        assertNotNull(doc0);
++        assertNotNull(doc1);
++        assertEquals("d555_2_4096_aaaaaaaaaaaaaaaa", doc0.blobId);
++        assertEquals("a1_d555_2_4096_aaaaaaaaaaaaaaaa", doc1.blobId);
++        assertEquals(1, onDb(() -> db.preservedBlobDao()
++                .getBlobsByDocument(ACCOUNT_0, 555L, 2, 4096L)).size());
++        assertEquals(1, onDb(() -> db.preservedBlobDao()
++                .getBlobsByDocument(ACCOUNT_1, 555L, 2, 4096L)).size());
++        assertEquals("d555_2_4096_aaaaaaaaaaaaaaaa", onDb(() -> db.preservedBlobDao()
++                .getBlobsByDocument(ACCOUNT_0, 555L, 2, 4096L)).get(0).blobId);
++
++        PreservedBlob photo0 = onDb(() -> db.preservedBlobDao()
++                .getByPhotoKey(ACCOUNT_0, 777L, 2, 2048L, SHA_PHOTO));
++        PreservedBlob photo1 = onDb(() -> db.preservedBlobDao()
++                .getByPhotoKey(ACCOUNT_1, 777L, 2, 2048L, SHA_PHOTO));
++        assertNotNull(photo0);
++        assertNotNull(photo1);
++        assertEquals("p777_2_2048_bbbbbbbbbbbbbbbb", photo0.blobId);
++        assertEquals("a1_p777_2_2048_bbbbbbbbbbbbbbbb", photo1.blobId);
++        assertEquals(1, onDb(() -> db.preservedBlobDao()
++                .getBlobsByPhoto(ACCOUNT_0, 777L, 2, 2048L)).size());
++        assertEquals(1, onDb(() -> db.preservedBlobDao()
++                .getBlobsByPhoto(ACCOUNT_1, 777L, 2, 2048L)).size());
++    }
++
++    @Test
++    public void d05_blobAccountIdSurvivesRoundTrip() throws Exception {
++        onDbVoid(() -> db.preservedBlobDao().insertBlob(
++                newBlob(ACCOUNT_1, "a1_d555_2_4096_aaaaaaaaaaaaaaaa", 555L, 0L, SHA_DOC, 4096L)));
++        PreservedBlob found = onDb(() -> db.preservedBlobDao().getById("a1_d555_2_4096_aaaaaaaaaaaaaaaa"));
++        assertNotNull(found);
++        assertEquals(ACCOUNT_1, found.accountId);
++        assertNull(onDb(() -> db.preservedBlobDao()
++                .getByDocumentKey(ACCOUNT_0, 555L, 2, 4096L, SHA_DOC)));
++    }
++
++    // ------------------------------------------------------------------
++    // D-04 — refreshSizeMtimeForPath
++    // ------------------------------------------------------------------
++
++    @Test
++    public void d04_refreshFillsInPendingRowValues() throws Exception {
++        onDbVoid(() -> db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, 5L, "/cache/a.mp4")));
++        onDbVoid(() -> db.deferredDeleteDao()
++                .refreshSizeMtimeForPath("/cache/a.mp4", 4096L, T0));
++        DeferredDelete row = onDb(() -> db.deferredDeleteDao()
++                .getPendingForRef(ACCOUNT_0, 5L)).get(0);
++        assertEquals(4096L, row.sizeAtPin);
++        assertEquals(T0, row.mtimeAtPin);
++        assertEquals("PENDING", row.state);
++        // A second refresh updates the values again (materialisation can
++        // only happen once, but the update is idempotent-safe).
++        onDbVoid(() -> db.deferredDeleteDao()
++                .refreshSizeMtimeForPath("/cache/a.mp4", 8192L, T0 + 10));
++        DeferredDelete again = onDb(() -> db.deferredDeleteDao()
++                .getPendingForRef(ACCOUNT_0, 5L)).get(0);
++        assertEquals(8192L, again.sizeAtPin);
++        // Refreshing an unknown path touches nothing.
++        onDbVoid(() -> db.deferredDeleteDao()
++                .refreshSizeMtimeForPath("/cache/nope.mp4", 1L, 1L));
++        assertEquals(1, onDb(() -> db.deferredDeleteDao().getPendingForAccount(ACCOUNT_0)).size());
++    }
++
++    @Test
++    public void d04_refreshIgnoresDoneRows() throws Exception {
++        onDbVoid(() -> db.deferredDeleteDao().insert(newDeferred(ACCOUNT_0, 5L, "/cache/a.mp4")));
++        long rowId = onDb(() -> db.deferredDeleteDao()
++                .getPendingForRef(ACCOUNT_0, 5L)).get(0).id;
++        onDbVoid(() -> db.deferredDeleteDao().setState(rowId, "DONE"));
++        // The row is DONE: it no longer shows up as pending, and a refresh
++        // for its path must not resurrect or rewrite it (the SQL filters
++        // state = 'PENDING'); the pending set stays empty.
++        onDbVoid(() -> db.deferredDeleteDao()
++                .refreshSizeMtimeForPath("/cache/a.mp4", 4096L, T0));
++        assertTrue(onDb(() -> db.deferredDeleteDao().getPendingForAccount(ACCOUNT_0)).isEmpty());
++    }
++}
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31PolicyTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31PolicyTest.java
+new file mode 100644
+index 000000000..d6af63f76
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPhase31PolicyTest.java
+@@ -0,0 +1,70 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotEquals;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++import org.telegram.ui.ChatActivity;
++
++/**
++ * Phase 3.1 (D-13): production-code regression tests for the H-9/R-19
++ * branch table and for the Phase 3.1 account-scoped blob identity.
++ *
++ * <p>Background: the T-H9-1/2/3 and T-R19-1/2 tests in
++ * {@code AliGramEligibilityTest} assert on local model helpers, not on
++ * production code — and the model itself was WRONG: it assumed
++ * {@code ChatActivity.MODE_QUICK_REPLIES == 2}, but production says 5
++ * (2 is {@code MODE_PINNED}). The production branches compare against
++ * the symbolic constants everywhere, so the wrong model value never
++ * changed runtime behaviour — but it proves the model tests cannot
++ * catch a renumbering. These tests assert on the PRODUCTION constants
++ * themselves (compile-time constants, so no Android class is loaded at
++ * runtime — javac inlines the values), so a renumbering of any mode
++ * fails loudly here.
++ */
++public class AliGramPhase31PolicyTest {
++
++    @Test
++    public void h9ModesMatchProductionConstants() {
++        // The delete dispatch in MessagesStorage.markMessagesAsDeletedInternal
++        // compares the mode against these symbols: 0 = normal (deletes rows
++        // AND files), MODE_SCHEDULED / MODE_QUICK_REPLIES = SQL only on
++        // scheduled_messages_v2 / quick_replies_messages, no files at all.
++        assertEquals(0, ChatActivity.MODE_DEFAULT);
++        assertEquals(1, ChatActivity.MODE_SCHEDULED);
++        assertEquals(2, ChatActivity.MODE_PINNED);
++        assertEquals(5, ChatActivity.MODE_QUICK_REPLIES);
++        // Every mode is distinct — the old model value 2 for quick replies
++        // was actually MODE_PINNED, not quick replies.
++        assertNotEquals(ChatActivity.MODE_SCHEDULED, ChatActivity.MODE_QUICK_REPLIES);
++        assertNotEquals(ChatActivity.MODE_PINNED, ChatActivity.MODE_QUICK_REPLIES);
++        assertNotEquals(ChatActivity.MODE_PINNED, ChatActivity.MODE_SCHEDULED);
++        assertNotEquals(ChatActivity.MODE_DEFAULT, ChatActivity.MODE_SCHEDULED);
++    }
++
++    @Test
++    public void blobIdIsAccountScoped() {
++        String sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
++        String legacy = AliGramEligibility.blobIdFor(123L, 0L, 2, 1000L, sha);
++        // Account 0 keeps the legacy id (migrated v1 rows stay valid).
++        assertEquals(legacy, AliGramEligibility.blobIdFor(0, 123L, 0L, 2, 1000L, sha));
++        assertTrue(legacy.startsWith("d123_2_1000_abcdef0123456789"));
++        // Another account: same media, different blob id, prefixed.
++        String other = AliGramEligibility.blobIdFor(1, 123L, 0L, 2, 1000L, sha);
++        assertNotEquals(legacy, other);
++        assertTrue(other.startsWith("a1_d123_2_1000_abcdef0123456789"));
++        assertEquals(legacy, other.substring("a1_".length()));
++        // Deterministic per account.
++        assertEquals(other, AliGramEligibility.blobIdFor(1, 123L, 0L, 2, 1000L, sha));
++        // Photo identity, account-scoped the same way.
++        String photo = AliGramEligibility.blobIdFor(2, 0L, 456L, 2, 800L, "ffffffffffffffff");
++        assertTrue(photo.startsWith("a2_p456_2_800_ffffffffffffffff"));
++    }
++
++    @Test
++    public void noPinSourceReasonIsDistinct() {
++        assertEquals("NO_PIN_SOURCE", AliGramEligibility.REASON_NO_PIN_SOURCE);
++        assertNotEquals(AliGramEligibility.REASON_SOURCE_GONE, AliGramEligibility.REASON_NO_PIN_SOURCE);
++    }
++}
+-- 
+2.43.0
+

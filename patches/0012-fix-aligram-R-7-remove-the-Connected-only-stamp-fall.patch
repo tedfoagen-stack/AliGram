@@ -1,0 +1,383 @@
+From b0e7baf0298373ab4e13d4652dd2df17f3bd812c Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:54:48 +0000
+Subject: [PATCH 12/67] =?UTF-8?q?fix(aligram):=20R-7=20=E2=80=94=20remove?=
+ =?UTF-8?q?=20the=20Connected-only=20stamp=20fallback;=20harden=20the=20se?=
+ =?UTF-8?q?rver-round=20signal;=20remove=20dead=20D-08=20trigger?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The 30 s Connected-only fallback stamped activation time from
+getCurrentTime() with a possibly zero/stale timeDifference:
+Connected is set on the first valid data on a generic connection
+(ConnectionsManager.cpp:885) which can precede the handshake that
+recomputes timeDifference, and reconnects reuse sessions without a
+new handshake. Activation now requires Connected AND a
+server-originated round in this process (mayStampActivation), else it
+stays PENDING — a late activation is safe, an early one enrols
+pre-activation messages.
+
+The round signal itself is hardened: the processUpdateArray hook now
+fires only for server-originated batches (fromGetDifference ||
+date != 0); locally synthesised batches (cache read-state,
+FileRef/Push/SecretChat replays, all (false, 0)) no longer set
+roundSeen.
+
+D-08 (audit): onConnectionStateChanged is verified dead (no caller,
+no didUpdateConnectionState observer, connectedSeen never read).
+It is removed, not wired: with the fallback gone, wiring it would
+only call maybeStampPending and stamp nothing. Evidence and the
+unexecuted runtime scenarios (clock skew, stale diff, lastServerTime
+trap, resumeNetwork correction) are documented in
+~/workspace/aligram/phase3-1-r7-note.md. Strict boundary
+(date > A) and the edit_date >= asymmetry are unchanged.
+---
+ .../ayugram/aligram/AliGramEligibility.java   |  17 +++
+ .../ayugram/aligram/AliGramPreservation.java  |  80 +++++------
+ .../messenger/MessagesController.java         |  18 ++-
+ .../aligram/AliGramActivationTest.java        | 136 ++++++++++++++++++
+ 4 files changed, 205 insertions(+), 46 deletions(-)
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+index 706a538b1..9b521ff3b 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+@@ -86,6 +86,23 @@ public final class AliGramEligibility {
+         return activationTime > 0;
+     }
+ 
++    /**
++     * R-7 stamping decision (Phase 3.1 — the 30-second Connected-only
++     * fallback was REMOVED because Connected alone cannot guarantee
++     * trustworthy time). A PENDING activation may be stamped only when,
++     * in this process, the connection is Connected AND at least one
++     * server-originated round (getDifference / updates) has completed.
++     * Either condition alone is insufficient: Connected can be set on the
++     * first valid data before the handshake recomputes
++     * {@code timeDifference}, and a completed update batch proves
++     * nothing if it was synthesised locally. There is no fallback — a
++     * PENDING activation simply stays PENDING (gate closed) until both
++     * hold. See {@code ~/workspace/aligram/phase3-1-r7-note.md}.
++     */
++    public static boolean mayStampActivation(boolean connected, boolean serverRoundSeenInProcess) {
++        return connected && serverRoundSeenInProcess;
++    }
++
+     /** The H-I gate is open only for a STAMPED record with a valid time. */
+     public static boolean isGateOpen(ActivationState state, int activationTime) {
+         return state == ActivationState.STAMPED && isValidActivationTime(activationTime);
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index e9fbc85fa..aced55a06 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -65,17 +65,14 @@ public final class AliGramPreservation {
+     private static final String STATE_STAMPED = "STAMPED";
+     private static final String STATE_OFF = "OFF";
+ 
+-    /** Fallback stamp delay when Connected is seen but no server round yet (R-A9 §3.5). */
+-    private static final long STAMP_FALLBACK_DELAY_MS = 30_000L;
++    /** Watchdog probes for the R-19 second wake-up (max probes per job). */
+     private static final int MAX_WATCHDOG_PROBES = 2;
+ 
+     // --- Queues / mirrors / in-flight state (all process-local) ---
+     /** Single-thread queue owning byte copies and the delete gate (Phase 2.3 §2.2). Never exposed. */
+     private static final DispatchQueue copyQueue = new DispatchQueue("aligramCopyQueue");
+     private static final ConcurrentHashMap<Integer, Boolean> startupDone = new ConcurrentHashMap<>();
+-    private static final ConcurrentHashMap<Integer, Boolean> connectedSeen = new ConcurrentHashMap<>();
+     private static final ConcurrentHashMap<Integer, Boolean> roundSeen = new ConcurrentHashMap<>();
+-    private static final ConcurrentHashMap<Integer, Boolean> stampFallbackScheduled = new ConcurrentHashMap<>();
+ 
+     /** In-memory pin mirror: absolute path → refId (durable row is authoritative). */
+     private static final ConcurrentHashMap<String, Long> pinnedPathMirror = new ConcurrentHashMap<>();
+@@ -240,12 +237,20 @@ public final class AliGramPreservation {
+ 
+     /**
+      * PENDING → STAMPED transition. Requires, in this process: the
+-     * connection state is Connected AND at least one server round
+-     * (processUpdateArray) has completed — R-7: never stamp from a
+-     * restored timeDifference alone. If only Connected is seen, schedule
+-     * one fallback stamp after 30 s (logged as a warning, per
+-     * phase3-investigations §3.5). Never accepts A ≤ 0; never uses device
+-     * time as a fallback (device time is stored for diagnostics only).
++     * connection state is Connected AND at least one server-originated
++     * round (getDifference / updates) has completed — R-7: never stamp
++     * from a restored timeDifference alone, and never from Connected
++     * alone. There is NO fallback: the 30 s Connected-only fallback was
++     * REMOVED in Phase 3.1 because Connected cannot guarantee trustworthy
++     * time (see ~/workspace/aligram/phase3-1-r7-note.md — Connected is
++     * set on the first valid data on a generic connection,
++     * ConnectionsManager.cpp:885, which can precede the handshake that
++     * recomputes timeDifference, and reconnects reuse sessions without
++     * any new handshake). If the conditions are not met the activation
++     * simply stays PENDING and preservation stays disabled — a late
++     * activation is safe, an early one enrols pre-activation messages.
++     * Never accepts A ≤ 0; never uses device time as a fallback
++     * (device time is stored for diagnostics only).
+      */
+     public static void maybeStampPending(int account) {
+         try {
+@@ -253,37 +258,26 @@ public final class AliGramPreservation {
+             try {
+                 connected = ConnectionsManager.getInstance(account).getConnectionState()
+                         == ConnectionsManager.ConnectionStateConnected;
+-                if (connected) {
+-                    connectedSeen.put(account, Boolean.TRUE);
+-                }
+             } catch (Throwable ignored) {
+             }
+             boolean round = Boolean.TRUE.equals(roundSeen.get(account));
+-            if (connected && round) {
+-                stampPendingNow(account, false);
++            if (AliGramEligibility.mayStampActivation(connected, round)) {
++                stampPendingNow(account);
+                 return;
+             }
+-            if (connected && !round && stampFallbackScheduled.putIfAbsent(account, Boolean.TRUE) == null) {
+-                copyQueue.postRunnable(() -> {
+-                    stampFallbackScheduled.remove(account);
+-                    try {
+-                        if (Boolean.TRUE.equals(roundSeen.get(account))) {
+-                            stampPendingNow(account, false);
+-                        } else {
+-                            FileLog.d(TAG + ": stamping on Connected alone (no server round in 30s) — warning, R-A9 fallback");
+-                            stampPendingNow(account, true);
+-                        }
+-                    } catch (Throwable e) {
+-                        FileLog.e(TAG + ": fallback stamp failed", e);
+-                    }
+-                }, STAMP_FALLBACK_DELAY_MS);
++            // No fallback exists any more: staying PENDING is the safe
++            // state. Log why, so a stuck PENDING is diagnosable.
++            if (connected && !round) {
++                FileLog.d(TAG + ": activation stays PENDING — Connected but no server-originated round yet in this process (R-7, no fallback)");
++            } else if (!connected) {
++                FileLog.d(TAG + ": activation stays PENDING — not Connected (R-7)");
+             }
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": maybeStampPending failed", e);
+         }
+     }
+ 
+-    private static void stampPendingNow(int account, boolean fallbackOnly) {
++    private static void stampPendingNow(int account) {
+         SharedPreferences prefs = prefsFor(account);
+         Map<String, ?> all = prefs.getAll();
+         List<String> pendingKeys = new ArrayList<>();
+@@ -315,10 +309,22 @@ public final class AliGramPreservation {
+         }
+         editor.apply();
+         FileLog.d(TAG + ": stamped " + pendingKeys.size() + " pending activation(s) at server time "
+-                + serverNow + (fallbackOnly ? " (Connected-only fallback)" : ""));
++                + serverNow);
+     }
+ 
+-    /** Called from the end of MessagesController.processUpdateArray: a server round completed. */
++    /**
++     * Called from the end of {@code MessagesController.processUpdateArray}
++     * for SERVER-ORIGINATED batches only (the call site gates on
++     * {@code fromGetDifference || date != 0}): a completed getDifference /
++     * updates round proves, in this process, that the session is live and
++     * the server accepted our clock (a wrong timeDifference would be
++     * rejected with bad_msg_id / bad_server_salt and corrected by the
++     * native handlers). Locally synthesised batches (read-state updates
++     * built from cache, {@code date == 0} and not from getDifference) do
++     * NOT call this — they prove no server contact and must never set
++     * {@code roundSeen} (Phase 3.1 hardening of the R-7 signal; see
++     * phase3-1-r7-note.md §4).
++     */
+     public static void onServerRoundCompleted(int account) {
+         try {
+             roundSeen.put(account, Boolean.TRUE);
+@@ -328,16 +334,6 @@ public final class AliGramPreservation {
+         }
+     }
+ 
+-    /** Called when the connection state changes to Connected (best-effort stamp trigger). */
+-    public static void onConnectionStateChanged(int account) {
+-        try {
+-            connectedSeen.put(account, Boolean.TRUE);
+-            maybeStampPending(account);
+-        } catch (Throwable e) {
+-            FileLog.e(TAG + ": onConnectionStateChanged failed", e);
+-        }
+-    }
+-
+     // ==================================================================
+     // Masters / M-T / network / scope
+     // ==================================================================
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+index 79b0b29f6..df75be449 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+@@ -21503,10 +21503,20 @@ public class MessagesController extends BaseController implements NotificationCe
+         // a successful getDifference / updates batch. Stamping a PENDING
+         // activation requires this event in the current process, never a
+         // restored timeDifference alone (Phase 2.3 §1.5 + phase3 §3.5).
+-        try {
+-            AliGramPreservation.onServerRoundCompleted(currentAccount);
+-        } catch (Throwable e) {
+-            FileLog.e(e);
++        //
++        // Phase 3.1: ONLY for server-originated batches. processUpdateArray
++        // is also called with locally synthesised read-state updates built
++        // from cache (MessagesController:7563, :7791, :7805 — date == 0,
++        // fromGetDifference == false), which prove no server contact and
++        // must never set roundSeen. Server batches arrive either from
++        // getDifference (fromGetDifference == true, date == 0) or from
++        // processUpdates (fromGetDifference == false, date == server time).
++        if (fromGetDifference || date != 0) {
++            try {
++                AliGramPreservation.onServerRoundCompleted(currentAccount);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+         }
+ 
+         return true;
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
+new file mode 100644
+index 000000000..58ba9365b
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
+@@ -0,0 +1,136 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/**
++ * Deterministic JVM unit tests for the Phase 3.1 R-7 stamping fix.
++ *
++ * <p>Scope: the pure decision functions in {@link AliGramEligibility} only.
++ * The 30-second Connected-only fallback was REMOVED — these tests pin the
++ * replacement rule (stamp only on Connected AND a server-originated round
++ * in this process; otherwise stay PENDING) and its observable effect on
++ * the ingest gate. The native evidence behind the rule (what Connected
++ * does and does not guarantee, the callers that do and do not prove a
++ * server round) is documented in
++ * {@code ~/workspace/aligram/phase3-1-r7-note.md} — it is NOT proven by
++ * these tests, and the runtime scenarios listed there remain unexecuted.
++ *
++ * <p>The design asymmetry ({@code edit_date >= activationTime} for edit
++ * enrolment vs strict {@code date > activationTime} for ingest) is NOT
++ * changed here and stays pinned by {@code AliGramEligibilityTest}.
++ */
++public class AliGramActivationTest {
++
++    private static final int A = 1_700_000_000;
++
++    // ------------------------------------------------------------------
++    // mayStampActivation: the R-7 rule — both conditions, no fallback.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void mayStamp_connectedAndRound_stamps() {
++        assertTrue(AliGramEligibility.mayStampActivation(true, true));
++    }
++
++    @Test
++    public void mayStamp_connectedWithoutRound_doesNotStamp() {
++        // This IS the removed fallback: Connected alone, 30 s or not,
++        // must never stamp. A PENDING activation stays PENDING.
++        assertFalse(AliGramEligibility.mayStampActivation(true, false));
++    }
++
++    @Test
++    public void mayStamp_roundWithoutConnected_doesNotStamp() {
++        // A round recorded earlier in this process but no live connection
++        // now: do not stamp on a possibly stale timeDifference. The next
++        // reconnect + round will stamp.
++        assertFalse(AliGramEligibility.mayStampActivation(false, true));
++    }
++
++    @Test
++    public void mayStamp_neither_doesNotStamp() {
++        assertFalse(AliGramEligibility.mayStampActivation(false, false));
++    }
++
++    // ------------------------------------------------------------------
++    // Server-time validity: A <= 0 is never accepted.
++    // ------------------------------------------------------------------
++
++    @Test
++    public void stampableServerTime_requiresPositive() {
++        assertFalse(AliGramEligibility.isValidActivationTime(0));
++        assertFalse(AliGramEligibility.isValidActivationTime(-5));
++        assertTrue(AliGramEligibility.isValidActivationTime(1));
++        assertTrue(AliGramEligibility.isValidActivationTime(A));
++    }
++
++    // ------------------------------------------------------------------
++    // Observable effect: the ingest gate stays closed while PENDING,
++    // even for a message dated after the (unstamped) activation time.
++    // ------------------------------------------------------------------
++
++    private boolean ingestOk(int messageDate,
++                             AliGramEligibility.ActivationState state, int activationTime) {
++        return AliGramEligibility.canIngest(
++                true, true, true, true, false,
++                true, true, false, true, false,
++                true, messageDate, activationTime, state, false);
++    }
++
++    @Test
++    public void gateClosedWhilePending_evenAfterActivation() {
++        // No stamp yet (A == 0 / PENDING): a brand-new message is NOT
++        // enrolled. This is what "staying PENDING is safe" means.
++        assertFalse(ingestOk(A + 60, AliGramEligibility.ActivationState.PENDING, 0));
++        assertFalse(AliGramEligibility.isGateOpen(
++                AliGramEligibility.ActivationState.PENDING, 0));
++    }
++
++    @Test
++    public void gateOpensOnlyWhenStampedWithValidTime() {
++        assertFalse(AliGramEligibility.isGateOpen(
++                AliGramEligibility.ActivationState.STAMPED, 0));
++        assertTrue(AliGramEligibility.isGateOpen(
++                AliGramEligibility.ActivationState.STAMPED, A));
++        assertTrue(ingestOk(A + 1, AliGramEligibility.ActivationState.STAMPED, A));
++        assertFalse(ingestOk(A, AliGramEligibility.ActivationState.STAMPED, A));
++    }
++
++    // ------------------------------------------------------------------
++    // SPEC-MODEL: what counts as a "server round" at the hook site.
++    //
++    // The hook lives at the end of MessagesController.processUpdateArray
++    // and fires only when (fromGetDifference || date != 0). This table
++    // mirrors the callers exactly; it is a tripwire for the rule, not
++    // operational verification — whether a given device build really
++    // delivers those parameters needs the runtime probe (T-B11).
++    // ------------------------------------------------------------------
++
++    /** Mirror of the hook gate in MessagesController.processUpdateArray. */
++    private static boolean isServerRound(boolean fromGetDifference, int date) {
++        return fromGetDifference || date != 0;
++    }
++
++    @Test
++    public void serverRoundSignal_getDifferenceCounts() {
++        // getDifference batches pass (true, 0).
++        assertTrue(isServerRound(true, 0));
++    }
++
++    @Test
++    public void serverRoundSignal_updatesWithServerDateCounts() {
++        // processUpdates / Stories / ChatTheme pass (false, server date).
++        assertTrue(isServerRound(false, 1_700_000_123));
++    }
++
++    @Test
++    public void serverRoundSignal_localSynthesisDoesNotCount() {
++        // Locally synthesised read-state / story / secret-chat batches:
++        // (false, 0) — built from cache or a push payload, no server
++        // round-trip, no clock proof. Must never set roundSeen.
++        assertFalse(isServerRound(false, 0));
++    }
++}
+-- 
+2.43.0
+

@@ -1,0 +1,220 @@
+From 55c436537762c2b0dbb16dfcc7044aa2cd6a7e29 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:39:00 +0000
+Subject: [PATCH 27/67] =?UTF-8?q?fix(aligram):=20O-01=20=E2=80=94=20preser?=
+ =?UTF-8?q?vation=20dialog=20shows=20one=20body=20text;=20PENDING=20gets?=
+ =?UTF-8?q?=20pending=20notice=20only=20+=20'Cancel=20activation'=20button?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+While PENDING the dialog showed the 'Preservation is ON…' text above the
+pending notice (contradictory) and the positive button read 'Disable
+preservation' while nothing was preserved yet. Now the ON text appears
+only when STAMPED; PENDING shows the pending notice alone and the button
+reads 'Cancel activation' (new English-base string
+AliGramPreservationCancelActivation). The toggle action itself is unchanged.
+
+The decision is a pure function (AliGramEligibility
+.resolvePreservationDialogState, null state treated as PENDING, opt-out
+wins) covered by 5 new JVM tests in AliGramPreservationDialogTest.
+---
+ .../ayugram/aligram/AliGramEligibility.java   | 37 +++++++++++
+ .../java/org/telegram/ui/ChatActivity.java    | 37 +++++++++--
+ .../src/main/res/values/strings_nax.xml       |  4 ++
+ .../AliGramPreservationDialogTest.java        | 64 +++++++++++++++++++
+ 4 files changed, 138 insertions(+), 4 deletions(-)
+ create mode 100644 TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPreservationDialogTest.java
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+index ac574dc00..d6c907177 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+@@ -72,6 +72,43 @@ public final class AliGramEligibility {
+         STAMPED
+     }
+ 
++    /**
++     * Which wording the preservation dialog shows (O-01, Phase 3.2).
++     *
++     * <p>The old dialog appended the "Preservation is ON…" text even while
++     * {@link ActivationState#PENDING}, then added the pending notice — the
++     * two sentences contradicted each other, and the positive button read
++     * "Disable preservation" while nothing was being preserved yet.
++     * Exactly one body text is shown now: the ON text only when STAMPED,
++     * the pending notice alone while PENDING, the OFF text when opted out.
++     */
++    public enum PreservationDialogState {
++        /** Opted out: show the OFF text, positive button enables. */
++        DISABLED,
++        /** Opted in but not yet stamped: show only the pending notice. */
++        PENDING,
++        /** Opted in and stamped: show the ON text, positive button disables. */
++        ENABLED
++    }
++
++    /**
++     * Pure dialog-state decision for
++     * {@code ChatActivity.showAliGramPreservationDialogInternal}.
++     *
++     * <p>A {@code null} activation state is treated as PENDING (never show
++     * the ON text without a proven stamp). The opt-out wins over the
++     * activation state: a disabled chat is DISABLED even if a stale
++     * STAMPED record is still on disk.
++     */
++    public static PreservationDialogState resolvePreservationDialogState(boolean enabled, ActivationState state) {
++        if (!enabled) {
++            return PreservationDialogState.DISABLED;
++        }
++        return state == ActivationState.STAMPED
++                ? PreservationDialogState.ENABLED
++                : PreservationDialogState.PENDING;
++    }
++
+     // ------------------------------------------------------------------
+     // Activation boundary (Phase 2.3 §1).
+     // ------------------------------------------------------------------
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index c6f83027f..720a758dd 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -46379,10 +46379,26 @@ public class ChatActivity extends BaseFragment implements
+         final int account = currentAccount;
+         boolean enabled = AliGramPreservation.isOptedIn(account, did);
+         AliGramPreservation.Activation act = AliGramPreservation.getActivation(account, did);
++        // O-01 (Phase 3.2): exactly one body text. The ON text is shown
++        // only when STAMPED; while PENDING the pending notice stands alone
++        // (no "Preservation is ON…" above it), and the positive button
++        // reads "Cancel activation" — nothing is being preserved yet, so
++        // "Disable preservation" would misdescribe the action. The toggle
++        // itself is unchanged: it still just flips the opt-in flag.
++        AliGramEligibility.PreservationDialogState dialogState =
++                AliGramEligibility.resolvePreservationDialogState(enabled, act.state);
+         StringBuilder message = new StringBuilder();
+-        message.append(getString(enabled ? R.string.AliGramPreservationEnabled : R.string.AliGramPreservationDisabled));
+-        if (enabled && act.state == AliGramEligibility.ActivationState.PENDING) {
+-            message.append("\n\n").append(getString(R.string.AliGramPreservationPending));
++        switch (dialogState) {
++            case ENABLED:
++                message.append(getString(R.string.AliGramPreservationEnabled));
++                break;
++            case PENDING:
++                message.append(getString(R.string.AliGramPreservationPending));
++                break;
++            case DISABLED:
++            default:
++                message.append(getString(R.string.AliGramPreservationDisabled));
++                break;
+         }
+         if (stats != null && stats[0] > 0) {
+             message.append("\n\n").append(LocaleController.formatString(R.string.AliGramPreservationStats, stats[0], AndroidUtilities.formatFileSize(stats[2])));
+@@ -46390,7 +46406,20 @@ public class ChatActivity extends BaseFragment implements
+         AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+         builder.setTitle(getString(R.string.AliGramPreservationTitle));
+         builder.setMessage(message.toString());
+-        builder.setPositiveButton(getString(enabled ? R.string.AliGramPreservationDisable : R.string.AliGramPreservationEnable), (dialogInterface, i) -> {
++        final int positiveRes;
++        switch (dialogState) {
++            case ENABLED:
++                positiveRes = R.string.AliGramPreservationDisable;
++                break;
++            case PENDING:
++                positiveRes = R.string.AliGramPreservationCancelActivation;
++                break;
++            case DISABLED:
++            default:
++                positiveRes = R.string.AliGramPreservationEnable;
++                break;
++        }
++        builder.setPositiveButton(getString(positiveRes), (dialogInterface, i) -> {
+             boolean nowEnabled = AliGramPreservation.togglePreservation(account, did);
+             BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.done, getString(nowEnabled ? R.string.AliGramPreservationEnabledToast : R.string.AliGramPreservationDisabledToast)).show();
+         });
+diff --git a/TMessagesProj/src/main/res/values/strings_nax.xml b/TMessagesProj/src/main/res/values/strings_nax.xml
+index 376c6886b..01c39e079 100644
+--- a/TMessagesProj/src/main/res/values/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values/strings_nax.xml
+@@ -293,6 +293,10 @@
+     <string name="AliGramPreservationStats">%1$d preserved items, %2$s stored in this chat</string>
+     <string name="AliGramPreservationEnable">Enable preservation</string>
+     <string name="AliGramPreservationDisable">Disable preservation</string>
++    <!-- O-01 (Phase 3.2): positive button while activation is PENDING — nothing is
++         preserved yet, so this cancels the pending activation rather than disabling
++         an active feature. The toggle action itself is unchanged. -->
++    <string name="AliGramPreservationCancelActivation">Cancel activation</string>
+     <string name="AliGramPreservationClear">Clear preserved media</string>
+     <string name="AliGramPreservationClearConfirm">Delete all media preserved by AliGram in this chat? Preservation stays enabled and will keep preserving new media.</string>
+     <string name="AliGramPreservedCleared">Preserved media cleared</string>
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPreservationDialogTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPreservationDialogTest.java
+new file mode 100644
+index 000000000..c908551d3
+--- /dev/null
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramPreservationDialogTest.java
+@@ -0,0 +1,64 @@
++package com.radolyn.ayugram.aligram;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++/**
++ * Deterministic JVM unit tests for the O-01 (Phase 3.2) preservation-dialog
++ * wording decision in {@link AliGramEligibility#resolvePreservationDialogState}.
++ *
++ * <p>Scope: the pure decision only — which body text and positive button the
++ * dialog shows for a given (opted-in, activation-state) pair. The Android
++ * dialog itself ({@code ChatActivity.showAliGramPreservationDialogInternal},
++ * string resources, button wiring) is NOT covered here and must be verified
++ * by code review: the mapping from {@code PreservationDialogState} to
++ * string resources lives there, and these tests pin the decision it is built
++ * on so a future change to the branching fails loudly instead of silently
++ * re-introducing the contradiction (ON text shown while PENDING).
++ */
++public class AliGramPreservationDialogTest {
++
++    @Test
++    public void enabledPendingShowsPendingOnly() {
++        assertEquals(
++                AliGramEligibility.PreservationDialogState.PENDING,
++                AliGramEligibility.resolvePreservationDialogState(
++                        true, AliGramEligibility.ActivationState.PENDING));
++    }
++
++    @Test
++    public void enabledStampedShowsEnabled() {
++        assertEquals(
++                AliGramEligibility.PreservationDialogState.ENABLED,
++                AliGramEligibility.resolvePreservationDialogState(
++                        true, AliGramEligibility.ActivationState.STAMPED));
++    }
++
++    @Test
++    public void disabledPendingShowsDisabled() {
++        // Opt-out wins: a disabled chat never shows the pending notice,
++        // even if a stale PENDING record is still on disk.
++        assertEquals(
++                AliGramEligibility.PreservationDialogState.DISABLED,
++                AliGramEligibility.resolvePreservationDialogState(
++                        false, AliGramEligibility.ActivationState.PENDING));
++    }
++
++    @Test
++    public void disabledStampedShowsDisabled() {
++        // Opt-out wins over a stale STAMPED record as well.
++        assertEquals(
++                AliGramEligibility.PreservationDialogState.DISABLED,
++                AliGramEligibility.resolvePreservationDialogState(
++                        false, AliGramEligibility.ActivationState.STAMPED));
++    }
++
++    @Test
++    public void enabledNullStateTreatedAsPending() {
++        // Defensive: without a proven stamp the ON text must never show.
++        assertEquals(
++                AliGramEligibility.PreservationDialogState.PENDING,
++                AliGramEligibility.resolvePreservationDialogState(true, null));
++    }
++}
+-- 
+2.43.0
+

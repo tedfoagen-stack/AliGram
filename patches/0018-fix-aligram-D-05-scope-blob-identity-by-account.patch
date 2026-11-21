@@ -1,0 +1,324 @@
+From 7b3039d18f2341eb2be6f24e582e596c8f0f9491 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:00:29 +0000
+Subject: [PATCH 18/67] =?UTF-8?q?fix(aligram):=20D-05=20=E2=80=94=20scope?=
+ =?UTF-8?q?=20blob=20identity=20by=20account?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: blob storage is per-account (AliGramFileCopy.getBlobDir) but
+PreservedBlob had no account column and getByDocumentKey /
+getByPhotoKey / getBlobsByDocument / getBlobsByPhoto filtered only on
+(documentId|photoId, dcId, size, sha256), so the second account's ref
+was bound to a blob file living only in the first account's dir
+(noteCopiedFile found no file, startup split-brain marked the ref
+UNAVAILABLE; purgeAccount(A) deleted the file under B's ref). Fix:
+PreservedBlob.accountId (Room v2, MIGRATION_1_2 adds the column with
+default 0) + account filter on all four identity lookups +
+account-scoped blob id (new AliGramEligibility.blobIdFor(accountId,
+...) overload — 'a<N>_' prefix for N != 0; account 0 keeps the legacy
+id so migrated v1 rows stay valid; the 5-arg form is unchanged, its
+format is pinned by tests). The v1 indices are deliberately unchanged
+so the migration stays a single ALTER TABLE (Room validates indices
+after a manual migration). findBlobForIdentity is account-scoped too,
+so policy (ii) can no longer bind a revision to another account's
+bytes. sweepRefcountZeroBlobs now deletes an orphaned blob's file from
+every account directory (pre-D-05 / migrated rows may name a file in
+another account's dir). The CI build will generate the new v2 schema
+JSON under TMessagesProj/schemas/ (room.schemaLocation is configured).
+---
+ .../radolyn/ayugram/aligram/AliGramData.java  |  1 +
+ .../ayugram/aligram/AliGramDatabase.java      | 21 +++++++-
+ .../ayugram/aligram/AliGramEligibility.java   | 18 +++++++
+ .../ayugram/aligram/AliGramPreservation.java  | 53 ++++++++++++++-----
+ .../ayugram/aligram/PreservedBlob.java        | 17 ++++++
+ .../ayugram/aligram/PreservedBlobDao.java     | 23 ++++----
+ 6 files changed, 108 insertions(+), 25 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramData.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramData.java
+index 844bba740..8c90ebc4a 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramData.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramData.java
+@@ -31,6 +31,7 @@ public final class AliGramData {
+         try {
+             database = Room.databaseBuilder(ApplicationLoader.applicationContext, AliGramDatabase.class, DATABASE_NAME)
+                     .fallbackToDestructiveMigrationOnDowngrade()
++                    .addMigrations(AliGramDatabase.MIGRATION_1_2)
+                     .build();
+             return true;
+         } catch (Throwable e) {
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramDatabase.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramDatabase.java
+index 7d9ebda7d..dd7d74b54 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramDatabase.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramDatabase.java
+@@ -1,20 +1,37 @@
+ package com.radolyn.ayugram.aligram;
+ 
++import androidx.annotation.NonNull;
+ import androidx.room.Database;
+ import androidx.room.RoomDatabase;
++import androidx.room.migration.Migration;
++import androidx.sqlite.db.SupportSQLiteDatabase;
+ 
+ /**
+- * Separate Room database {@code aligram-preservation} v1 (Phase 2.2 §6.1).
++ * Separate Room database {@code aligram-preservation} (Phase 2.2 §6.1).
+  * No {@code cache4.db} change (stays v176) and no {@code ayu-data}
+  * migration (stays v26). A downgrade wipes only the preservation index;
+  * blobs are swept as orphans by the next newer build.
++ *
++ * <p>v2 (Phase 3.1, D-05): {@code PreservedBlob} gains {@code accountId}
++ * — blob identity is account-scoped, matching the per-account blob
++ * directories. Migrated v1 rows carry 0; account 0 also keeps the legacy
++ * unprefixed blob ids, so migrated account-0 rows stay valid.
+  */
+ @Database(
+         entities = {PreservedRef.class, PreservedBlob.class, DeferredDelete.class},
+-        version = 1,
++        version = 2,
+         exportSchema = true
+ )
+ public abstract class AliGramDatabase extends RoomDatabase {
++
++    /** v1 → v2 (Phase 3.1, D-05): add the accountId column; default 0. */
++    public static final Migration MIGRATION_1_2 = new Migration(1, 2) {
++        @Override
++        public void migrate(@NonNull SupportSQLiteDatabase db) {
++            db.execSQL("ALTER TABLE `PreservedBlob` ADD COLUMN `accountId` INTEGER NOT NULL DEFAULT 0");
++        }
++    };
++
+     public abstract PreservedRefDao preservedRefDao();
+ 
+     public abstract PreservedBlobDao preservedBlobDao();
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+index 9b521ff3b..f339e4042 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramEligibility.java
+@@ -338,6 +338,24 @@ public final class AliGramEligibility {
+         return String.format(Locale.US, "s%d_%s", size, shaPart);
+     }
+ 
++    /**
++     * Phase 3.1 (D-05): account-scoped blob id. Blob files live in
++     * per-account directories, but the blob id is the primary key — so a
++     * global id let two accounts share one row pointing at a file that
++     * exists in only one account's directory (the second account's ref
++     * then rendered nothing and degraded to UNAVAILABLE at startup, and
++     * a purge of the first account deleted the file under the second
++     * account's ref). Account 0 keeps the legacy id (existing installs'
++     * rows stay valid); other accounts get an {@code a<N>_} prefix, so
++     * the same media in two accounts is two rows in two directories.
++     * The 5-arg form above is unchanged (its format is pinned by tests).
++     */
++    public static String blobIdFor(int accountId, long documentId, long photoId, int dcId,
++                                   long size, String sha256Hex) {
++        String base = blobIdFor(documentId, photoId, dcId, size, sha256Hex);
++        return accountId == 0 ? base : "a" + accountId + "_" + base;
++    }
++
+     /** SHA-256 hex of bytes (single-pass helper used by tests and the copy path). */
+     public static String sha256Hex(byte[] data) {
+         try {
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 4315a4c55..6a4025059 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1274,8 +1274,13 @@ public final class AliGramPreservation {
+         // rows recorded with 0,0 while it was still downloading, so the
+         // release after bind can pass decideRelease.
+         refreshDeferredForPath(source.getAbsolutePath(), source.length(), source.lastModified());
+-        // Dedupe at copy time: same (documentId|photoId, dcId, size, sha256) ⇒ reuse.
+-        String blobId = AliGramEligibility.blobIdFor(job.documentId, job.photoId, job.dcId,
++        // Dedupe at copy time: same (accountId, documentId|photoId, dcId, size, sha256) ⇒ reuse.
++        // Phase 3.1 (D-05): the blob id AND the lookup are account-scoped —
++        // a global id/lookup bound a ref to a blob file in another
++        // account's directory (no file in this account's dir, render
++        // missed, UNAVAILABLE at startup, purge of the other account
++        // deleted the file under this ref).
++        String blobId = AliGramEligibility.blobIdFor(job.accountId, job.documentId, job.photoId, job.dcId,
+                 result.size, result.sha256Hex);
+         String ext = job.expectedFileName != null ? extensionOf(job.expectedFileName) : "";
+         if (ext.isEmpty()) {
+@@ -1284,9 +1289,9 @@ public final class AliGramPreservation {
+         PreservedBlob existing = null;
+         try {
+             if (job.documentId != 0) {
+-                existing = blobDao.getByDocumentKey(job.documentId, job.dcId, result.size, result.sha256Hex);
++                existing = blobDao.getByDocumentKey(job.accountId, job.documentId, job.dcId, result.size, result.sha256Hex);
+             } else if (job.photoId != 0) {
+-                existing = blobDao.getByPhotoKey(job.photoId, job.dcId, result.size, result.sha256Hex);
++                existing = blobDao.getByPhotoKey(job.accountId, job.photoId, job.dcId, result.size, result.sha256Hex);
+             }
+         } catch (Throwable ignored) {
+         }
+@@ -1298,6 +1303,7 @@ public final class AliGramPreservation {
+         }
+         PreservedBlob blob = new PreservedBlob();
+         blob.blobId = blobId;
++        blob.accountId = job.accountId;
+         blob.documentId = job.documentId;
+         blob.photoId = job.photoId;
+         blob.dcId = job.dcId;
+@@ -1717,15 +1723,33 @@ public final class AliGramPreservation {
+                 if (refDao.countRefsForBlob(blob.blobId) > 0) {
+                     continue;
+                 }
+-                File file = AliGramFileCopy.blobFileFor(account, blob.blobId, blob.ext);
+-                AliGramFileCopy.deleteQuietly(file);
+-                blobDao.deleteById(blob.blobId);
++                deleteBlobRowAndFiles(blob, blobDao);
+             }
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": sweepRefcountZeroBlobs failed", e);
+         }
+     }
+ 
++    /**
++     * Delete one orphaned blob row and its file. Phase 3.1 (D-05): the
++     * file is deleted from EVERY account directory, not just the
++     * caller's — a pre-D-05 or migrated row may carry a stale
++     * {@code accountId} while its file actually lives in another
++     * account's dir, and deleting only the caller's dir would leak the
++     * file. The name is the content-addressed blob id, so deleting it
++     * from a directory that does not contain it is a no-op.
++     */
++    private static void deleteBlobRowAndFiles(PreservedBlob blob, PreservedBlobDao blobDao) {
++        try {
++            for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
++                AliGramFileCopy.deleteQuietly(AliGramFileCopy.blobFileFor(a, blob.blobId, blob.ext));
++            }
++            blobDao.deleteById(blob.blobId);
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": deleteBlobRowAndFiles failed", e);
++        }
++    }
++
+     // ==================================================================
+     // H-E Stage A pin + LIVE-sync (Phase 2.3 §2.2, §4.1, §4.3)
+     // ==================================================================
+@@ -1768,7 +1792,7 @@ public final class AliGramPreservation {
+             }
+             long userId = ownUserId(account);
+             boolean eligible = dao.getLiveRef(userId, dialogId, oldMessage.id) != null
+-                    || findBlobForIdentity(blobDao, oldIdent) != null;
++                    || findBlobForIdentity(account, blobDao, oldIdent) != null;
+             if (!eligible) {
+                 return -1;
+             }
+@@ -1876,14 +1900,17 @@ public final class AliGramPreservation {
+         }
+     }
+ 
+-    /** Policy (ii) test: does the exact media identity already exist as a blob? */
+-    private static PreservedBlob findBlobForIdentity(PreservedBlobDao blobDao, MediaIdentity ident) {
++    /** Policy (ii) test: does the exact media identity already exist as a blob in THIS account?
++     *  Phase 3.1 (D-05): the lookup is account-scoped — another account's
++     *  blob proves nothing here, because its file lives in that
++     *  account's directory, not this one. */
++    private static PreservedBlob findBlobForIdentity(int account, PreservedBlobDao blobDao, MediaIdentity ident) {
+         try {
+             List<PreservedBlob> candidates;
+             if (ident.documentId != 0) {
+-                candidates = blobDao.getBlobsByDocument(ident.documentId, ident.dcId, ident.expectedSize);
++                candidates = blobDao.getBlobsByDocument(account, ident.documentId, ident.dcId, ident.expectedSize);
+             } else if (ident.photoId != 0) {
+-                candidates = blobDao.getBlobsByPhoto(ident.photoId, ident.dcId, ident.expectedSize);
++                candidates = blobDao.getBlobsByPhoto(account, ident.photoId, ident.dcId, ident.expectedSize);
+             } else {
+                 return null;
+             }
+@@ -2138,7 +2165,7 @@ public final class AliGramPreservation {
+                 // No LIVE ref (message never enrolled): policy (i)+(ii).
+                 MediaIdentity oldIdent = identifyMedia(account, oldMessage);
+                 if (AliGramEligibility.isPreservableClass(oldIdent.mediaClass)) {
+-                    PreservedBlob existingBlob = findBlobForIdentity(blobDao, oldIdent);
++                    PreservedBlob existingBlob = findBlobForIdentity(account, blobDao, oldIdent);
+                     PreservedRef editRef = newPreservedRef(account, userId, dialogId, messageId,
+                             "EDIT", seq, oldIdent, AliGramEligibility.STATE_UNAVAILABLE, "EDIT_FREEZE");
+                     editRef.ayuFakeId = fakeId;
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
+index a743fc767..0103447a5 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlob.java
+@@ -14,6 +14,14 @@ import androidx.room.PrimaryKey;
+ @Entity(
+         tableName = "PreservedBlob",
+         indices = {
++                // NOTE (Phase 3.1, D-05): the v1 indices are deliberately
++                // UNCHANGED in v2. The account filter in the DAO queries
++                // is served well enough by the (documentId, dcId, size)
++                // index + a post-filter on this small table, and keeping
++                // the indices stable keeps the v1→v2 migration a single
++                // ALTER TABLE — Room validates the full schema (indices
++                // included) after a manual migration, so a changed index
++                // set would need matching DROP/CREATE INDEX statements.
+                 @Index(value = {"documentId", "dcId", "size"}),
+                 @Index(value = {"sha256"})
+         }
+@@ -23,6 +31,15 @@ public class PreservedBlob {
+     @PrimaryKey
+     @NonNull
+     public String blobId;
++    /**
++     * Owning account (Phase 3.1, D-05 — Room v2). Blob files live in
++     * per-account directories, so blob identity is scoped by account:
++     * the same media in two accounts is two rows (and two files), never
++     * one row pointing at another account's directory. Rows migrated
++     * from v1 carry 0 (the v1 default); account 0 also keeps the legacy
++     * unprefixed blob ids, so migrated account-0 rows stay valid.
++     */
++    public int accountId;
+     /** 0 when photo. */
+     public long documentId;
+     /** 0 when document. */
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
+index 38bedceb0..debf6b154 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedBlobDao.java
+@@ -8,28 +8,31 @@ import androidx.room.Query;
+ import java.util.List;
+ 
+ /** DAO for {@link PreservedBlob}. Dedupe happens at copy time: if a blob
+- *  with the same (documentId|photoId, dcId, size, sha256) already exists,
+- *  the temp copy is discarded and the existing blob is reused (refcount+1). */
++ *  with the same (accountId, documentId|photoId, dcId, size, sha256)
++ *  already exists, the temp copy is discarded and the existing blob is
++ *  reused (refcount+1). Phase 3.1 (D-05): every identity lookup is
++ *  account-scoped — blob files live in per-account directories, so a
++ *  global lookup could bind a ref to a file in another account's dir. */
+ @Dao
+ public interface PreservedBlobDao {
+ 
+     @Insert(onConflict = OnConflictStrategy.IGNORE)
+     long insertBlob(PreservedBlob blob);
+ 
+-    @Query("SELECT * FROM PreservedBlob WHERE documentId = :documentId AND dcId = :dcId AND size = :size")
+-    List<PreservedBlob> getBlobsByDocument(long documentId, int dcId, long size);
++    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND documentId = :documentId AND dcId = :dcId AND size = :size")
++    List<PreservedBlob> getBlobsByDocument(int accountId, long documentId, int dcId, long size);
+ 
+-    @Query("SELECT * FROM PreservedBlob WHERE photoId = :photoId AND dcId = :dcId AND size = :size")
+-    List<PreservedBlob> getBlobsByPhoto(long photoId, int dcId, long size);
++    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND photoId = :photoId AND dcId = :dcId AND size = :size")
++    List<PreservedBlob> getBlobsByPhoto(int accountId, long photoId, int dcId, long size);
+ 
+     @Query("SELECT * FROM PreservedBlob WHERE blobId = :blobId LIMIT 1")
+     PreservedBlob getById(String blobId);
+ 
+-    @Query("SELECT * FROM PreservedBlob WHERE documentId = :documentId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
+-    PreservedBlob getByDocumentKey(long documentId, int dcId, long size, String sha256);
++    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND documentId = :documentId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
++    PreservedBlob getByDocumentKey(int accountId, long documentId, int dcId, long size, String sha256);
+ 
+-    @Query("SELECT * FROM PreservedBlob WHERE photoId = :photoId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
+-    PreservedBlob getByPhotoKey(long photoId, int dcId, long size, String sha256);
++    @Query("SELECT * FROM PreservedBlob WHERE accountId = :accountId AND photoId = :photoId AND dcId = :dcId AND size = :size AND sha256 = :sha256 LIMIT 1")
++    PreservedBlob getByPhotoKey(int accountId, long photoId, int dcId, long size, String sha256);
+ 
+     @Query("UPDATE PreservedBlob SET refCount = refCount + 1 WHERE blobId = :blobId")
+     void incrementRefCount(String blobId);
+-- 
+2.43.0
+

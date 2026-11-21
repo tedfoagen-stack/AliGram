@@ -1,0 +1,33 @@
+From d27e66de1dcf49fd9b1a578722fd84de668cbf97 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:34:28 +0300
+Subject: [PATCH 66/67] fix(aligram): move stray @Override from auto-lock field
+ back to onResume (compile error)
+
+---
+ TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index 657991b00..d34fdbb62 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -31054,7 +31054,6 @@ public class ChatActivity extends BaseFragment implements
+ 
+     Bulletin.Delegate bulletinDelegate;
+ 
+-    @Override
+     // --- AliGram hidden folders: auto-lock while inside a hidden chat. ---
+     private Runnable aliGramAutoLockCheckRunnable;
+ 
+@@ -31107,6 +31106,7 @@ public class ChatActivity extends BaseFragment implements
+         }
+     }
+ 
++    @Override
+     public void onResume() {
+         super.onResume();
+         // --- AliGram hidden folders: (re)schedule the auto-lock check.
+-- 
+2.43.0
+

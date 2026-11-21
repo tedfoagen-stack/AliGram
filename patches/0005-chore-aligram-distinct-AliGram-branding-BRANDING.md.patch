@@ -1,0 +1,1729 @@
+From 5a3009954e82b4859c34e1df721d44096fcbe8a6 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:11:39 +0000
+Subject: [PATCH 05/67] chore(aligram): distinct AliGram branding (BRANDING.md)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+applicationId nu.gpu.nagram -> app.aligram (gradle.properties);
+hardcoded package refs in the manifest mime types, auth.xml,
+auth_menu.xml, contacts.xml, sync_contacts.xml updated to
+app.aligram. App name 'Nagram X' -> 'AliGram' in AppName / NagramX
+strings (base + all locales) and in the app-name sentences
+(UnifiedPush, CustomTitleHint, PushServiceTypeInApp, NekoSettings).
+Original AliGram icon (teal rounded square + white paper plane,
+drawn from scratch with PIL; no Nagram art copied) in all mipmap
+densities + round variants + adaptive-icon XMLs + 512px playstore
+asset; application icon/roundIcon and the sole remaining launcher
+alias (DefaultIcon, enabled=true) point at it. The 14 Nagram
+icon-variant activity-aliases were deleted from the manifest and
+LauncherIconController reduced to the single DEFAULT entry.
+QRCodeWriter / BlockingUpdateView and the notification-icon option 1
+use the new icon (white plane aligram_notification).
+Crashlytics stays disabled: shouldEnableCrashlytics() now returns
+false (the upstream Firebase project in google-services.json belongs
+to Nagram and is left untouched — push will not work for the new id
+until AliGram has its own Firebase project).
+Residual (documented): the unreferenced Nagram PNG assets remain in
+the tree; google-services.json is untouched; the legacy 'Nagram'
+notification-icon variant (option 2) and the upstream channel links
+in About remain.
+---
+ TMessagesProj/src/main/AndroidManifest.xml    | 242 ++----------------
+ .../main/ic_launcher_aligram-playstore.png    | Bin 0 -> 5285 bytes
+ .../com/google/zxing/qrcode/QRCodeWriter.java |   2 +-
+ .../messenger/NotificationsController.java    |   2 +-
+ .../ui/Components/BlockingUpdateView.java     |   2 +-
+ .../telegram/ui/LauncherIconController.java   |  23 +-
+ .../nekomimi/nekogram/utils/AndroidUtil.java  |   7 +-
+ .../drawable-hdpi/aligram_notification.png    | Bin 0 -> 232 bytes
+ .../drawable-mdpi/aligram_notification.png    | Bin 0 -> 170 bytes
+ .../drawable-xhdpi/aligram_notification.png   | Bin 0 -> 299 bytes
+ .../drawable-xxhdpi/aligram_notification.png  | Bin 0 -> 424 bytes
+ .../drawable-xxxhdpi/aligram_notification.png | Bin 0 -> 561 bytes
+ .../ic_launcher_aligram_background.xml        |   5 +
+ .../ic_launcher_aligram_foreground.xml        |  19 ++
+ .../mipmap-anydpi-v26/ic_launcher_aligram.xml |   5 +
+ .../ic_launcher_aligram_round.xml             |   5 +
+ .../res/mipmap-hdpi/ic_launcher_aligram.png   | Bin 0 -> 649 bytes
+ .../mipmap-hdpi/ic_launcher_aligram_round.png | Bin 0 -> 743 bytes
+ .../res/mipmap-mdpi/ic_launcher_aligram.png   | Bin 0 -> 445 bytes
+ .../mipmap-mdpi/ic_launcher_aligram_round.png | Bin 0 -> 501 bytes
+ .../res/mipmap-xhdpi/ic_launcher_aligram.png  | Bin 0 -> 860 bytes
+ .../ic_launcher_aligram_round.png             | Bin 0 -> 1006 bytes
+ .../res/mipmap-xxhdpi/ic_launcher_aligram.png | Bin 0 -> 1304 bytes
+ .../ic_launcher_aligram_round.png             | Bin 0 -> 1548 bytes
+ .../mipmap-xxxhdpi/ic_launcher_aligram.png    | Bin 0 -> 1784 bytes
+ .../ic_launcher_aligram_round.png             | Bin 0 -> 2156 bytes
+ .../src/main/res/values-ar/strings.xml        |   2 +-
+ .../src/main/res/values-de/strings.xml        |   2 +-
+ .../src/main/res/values-es-rES/strings_na.xml |   2 +-
+ .../main/res/values-es-rES/strings_nax.xml    |   4 +-
+ .../src/main/res/values-es/strings.xml        |   2 +-
+ .../src/main/res/values-fa-rIR/strings_na.xml |   2 +-
+ .../src/main/res/values-in-rID/strings_na.xml |   2 +-
+ .../main/res/values-in-rID/strings_nax.xml    |   4 +-
+ .../src/main/res/values-it-rIT/strings_na.xml |   2 +-
+ .../main/res/values-it-rIT/strings_nax.xml    |   4 +-
+ .../src/main/res/values-it/strings.xml        |   2 +-
+ .../src/main/res/values-ja-rJP/strings_na.xml |   2 +-
+ .../main/res/values-ja-rJP/strings_nax.xml    |   4 +-
+ .../src/main/res/values-ko/strings.xml        |   2 +-
+ .../src/main/res/values-ko/strings_na.xml     |   2 +-
+ .../src/main/res/values-ko/strings_nax.xml    |   4 +-
+ .../src/main/res/values-nl/strings.xml        |   2 +-
+ .../src/main/res/values-pl-rPL/strings_na.xml |   2 +-
+ .../main/res/values-pl-rPL/strings_nax.xml    |   4 +-
+ .../src/main/res/values-pt-rBR/strings.xml    |   2 +-
+ .../src/main/res/values-pt-rBR/strings_na.xml |   2 +-
+ .../main/res/values-pt-rBR/strings_nax.xml    |   4 +-
+ .../src/main/res/values-ru-rRU/strings_na.xml |   2 +-
+ .../main/res/values-ru-rRU/strings_nax.xml    |   4 +-
+ .../src/main/res/values-tr-rTR/strings_na.xml |   2 +-
+ .../main/res/values-tr-rTR/strings_nax.xml    |   4 +-
+ .../src/main/res/values-uk-rUA/strings_na.xml |   2 +-
+ .../main/res/values-uk-rUA/strings_nax.xml    |   4 +-
+ .../src/main/res/values-vi-rVN/strings_na.xml |   2 +-
+ .../main/res/values-vi-rVN/strings_nax.xml    |   4 +-
+ .../main/res/values-vi-rVN/strings_neko.xml   |   2 +-
+ .../src/main/res/values-zh-rCN/strings_na.xml |   2 +-
+ .../main/res/values-zh-rCN/strings_nax.xml    |   4 +-
+ .../src/main/res/values-zh-rTW/strings_na.xml |   4 +-
+ .../main/res/values-zh-rTW/strings_nax.xml    |   4 +-
+ TMessagesProj/src/main/res/values/strings.xml |   2 +-
+ .../src/main/res/values/strings_na.xml        |   2 +-
+ .../src/main/res/values/strings_nax.xml       |   6 +-
+ TMessagesProj/src/main/res/xml/auth.xml       |   2 +-
+ TMessagesProj/src/main/res/xml/auth_menu.xml  |   2 +-
+ TMessagesProj/src/main/res/xml/contacts.xml   |   6 +-
+ .../src/main/res/xml/sync_contacts.xml        |   2 +-
+ gradle.properties                             |   2 +-
+ 69 files changed, 124 insertions(+), 310 deletions(-)
+ create mode 100644 TMessagesProj/src/main/ic_launcher_aligram-playstore.png
+ create mode 100644 TMessagesProj/src/main/res/drawable-hdpi/aligram_notification.png
+ create mode 100644 TMessagesProj/src/main/res/drawable-mdpi/aligram_notification.png
+ create mode 100644 TMessagesProj/src/main/res/drawable-xhdpi/aligram_notification.png
+ create mode 100644 TMessagesProj/src/main/res/drawable-xxhdpi/aligram_notification.png
+ create mode 100644 TMessagesProj/src/main/res/drawable-xxxhdpi/aligram_notification.png
+ create mode 100644 TMessagesProj/src/main/res/drawable/ic_launcher_aligram_background.xml
+ create mode 100644 TMessagesProj/src/main/res/drawable/ic_launcher_aligram_foreground.xml
+ create mode 100644 TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram.xml
+ create mode 100644 TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram_round.xml
+ create mode 100644 TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram_round.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram_round.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram_round.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram_round.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram.png
+ create mode 100644 TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram_round.png
+
+diff --git a/TMessagesProj/src/main/AndroidManifest.xml b/TMessagesProj/src/main/AndroidManifest.xml
+index 7323e1f42..62873ec04 100644
+--- a/TMessagesProj/src/main/AndroidManifest.xml
++++ b/TMessagesProj/src/main/AndroidManifest.xml
+@@ -110,13 +110,13 @@
+         android:restoreAnyVersion="true"
+         android:backupAgent=".BackupAgent"
+         android:hardwareAccelerated="true"
+-        android:icon="@mipmap/ic_launcher_nagram_blue"
+-        android:label="@string/NagramX"
++        android:icon="@mipmap/ic_launcher_aligram"
++        android:label="@string/AppName"
+         android:largeHeap="true"
+         android:theme="@style/Theme.TMessages.Start"
+         android:manageSpaceActivity="org.telegram.ui.ExternalActionActivity"
+         android:networkSecurityConfig="@xml/network_security_config"
+-        android:roundIcon="@mipmap/ic_launcher_nagram_blue_round"
++        android:roundIcon="@mipmap/ic_launcher_aligram_round"
+         android:supportsRtl="false"
+         android:requestLegacyExternalStorage="true"
+         android:hasFragileUserData="true"
+@@ -128,124 +128,12 @@
+     >
+         <!-- usesCleartextTraffic for browser supporting opening http:// links -->
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.DefaultIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.GoogleIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_google"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_google_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.ColorfulIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_colorful"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_colorful_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.DarkGreenIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_darkgreen"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_darkgreen_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.NeonIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_neon"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_neon_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.NielloIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_round_niello"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_round_niello_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+         <activity-alias
+             android:enabled="true"
+-            android:name="org.telegram.messenger.BlueIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_blue"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_blue_round"
+-            android:exported="true">
+-
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+-
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.DarkBlueIcon"
++            android:name="org.telegram.messenger.DefaultIcon"
+             android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_dark_blue"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_dark_blue_round"
++            android:icon="@mipmap/ic_launcher_aligram"
++            android:roundIcon="@mipmap/ic_launcher_aligram_round"
+             android:exported="true">
+ 
+             <intent-filter>
+@@ -256,117 +144,19 @@
+             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+         </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.BlurBlueIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_nagram_blur_blue"
+-            android:roundIcon="@mipmap/ic_launcher_nagram_blur_blue_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.TelegramIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/ic_launcher_dr"
+-            android:roundIcon="@mipmap/ic_launcher_dr_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.VintageIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/icon_6_launcher"
+-            android:roundIcon="@mipmap/icon_6_launcher_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.AquaIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/icon_4_launcher"
+-            android:roundIcon="@mipmap/icon_4_launcher_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.PremiumIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/icon_3_launcher"
+-            android:roundIcon="@mipmap/icon_3_launcher_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.TurboIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/icon_5_launcher"
+-            android:roundIcon="@mipmap/icon_5_launcher_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+-        <activity-alias
+-            android:enabled="false"
+-            android:name="org.telegram.messenger.NoxIcon"
+-            android:targetActivity="org.telegram.ui.LaunchActivity"
+-            android:icon="@mipmap/icon_2_launcher"
+-            android:roundIcon="@mipmap/icon_2_launcher_round"
+-            android:exported="true">
+ 
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER" />
+-            </intent-filter>
+-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+-        </activity-alias>
+ 
+         <activity
+             android:name="org.telegram.ui.LaunchActivity"
+@@ -413,7 +203,7 @@
+             <intent-filter>
+                 <action android:name="android.intent.action.VIEW"/>
+                 <category android:name="android.intent.category.DEFAULT"/>
+-                <data android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.profile"/>
++                <data android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.profile"/>
+             </intent-filter>
+             <intent-filter>
+                 <action android:name="android.intent.action.VIEW"/>
+@@ -429,13 +219,13 @@
+                 <data android:host="www.keepassdx.com" android:scheme="http" />
+                 <data android:host="www.keepassdx.com" android:scheme="https" />
+             </intent-filter>
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round" android:priority="1">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round" android:priority="1">
+                 <action android:name="android.intent.action.VIEW"/>
+                 <category android:name="android.intent.category.DEFAULT" />
+                 <category android:name="android.intent.category.BROWSABLE" />
+                 <data android:scheme="tonsite" />
+             </intent-filter>
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round" android:priority="1">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round" android:priority="1">
+                 <action android:name="android.intent.action.VIEW" />
+                 <category android:name="android.intent.category.BROWSABLE" />
+                 <category android:name="android.intent.category.DEFAULT" />
+@@ -460,8 +250,8 @@
+             <intent-filter>
+                 <action android:name="android.intent.action.VIEW"/>
+                 <category android:name="android.intent.category.DEFAULT"/>
+-                <data android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.call"/>
+-                <data android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.call.video"/>
++                <data android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.call"/>
++                <data android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.call.video"/>
+             </intent-filter>
+         </activity-alias>
+         <activity
+@@ -481,7 +271,7 @@
+             android:stateNotNeeded="true"
+             android:theme="@style/Theme.TMessages.Transparent"
+             android:exported="true">
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round" android:priority="1">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round" android:priority="1">
+                 <action android:name="android.intent.action.VIEW" />
+                 <category android:name="android.intent.category.BROWSABLE" />
+                 <category android:name="android.intent.category.DEFAULT" />
+@@ -494,7 +284,7 @@
+             android:hardwareAccelerated="true"
+             android:windowSoftInputMode="adjustPan"
+             android:exported="true">
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round">
+                 <action android:name="org.telegram.passport.AUTHORIZE"/>
+                 <category android:name="android.intent.category.DEFAULT"/>
+             </intent-filter>
+@@ -505,7 +295,7 @@
+             android:hardwareAccelerated="true"
+             android:windowSoftInputMode="adjustPan"
+             android:exported="true">
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round">
+                 <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE"/>
+             </intent-filter>
+         </activity>
+@@ -515,7 +305,7 @@
+             android:hardwareAccelerated="true"
+             android:windowSoftInputMode="adjustPan"
+             android:exported="true">
+-            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round">
++            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round">
+                 <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE"/>
+             </intent-filter>
+         </activity>
+@@ -524,7 +314,7 @@
+ <!--            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode"-->
+ <!--            android:hardwareAccelerated="true"-->
+ <!--            android:windowSoftInputMode="adjustPan">-->
+-<!--            <intent-filter android:icon="@mipmap/ic_launcher_nagram_blue" android:roundIcon="@mipmap/ic_launcher_nagram_blue_round">-->
++<!--            <intent-filter android:icon="@mipmap/ic_launcher_aligram" android:roundIcon="@mipmap/ic_launcher_aligram_round">-->
+ <!--                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE"/>-->
+ <!--            </intent-filter>-->
+ <!--        </activity>-->
+diff --git a/TMessagesProj/src/main/ic_launcher_aligram-playstore.png b/TMessagesProj/src/main/ic_launcher_aligram-playstore.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c07a3485b02e3d2f1c0d88343703d0055552eff8
+GIT binary patch
+literal 5285
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/java/com/google/zxing/qrcode/QRCodeWriter.java b/TMessagesProj/src/main/java/com/google/zxing/qrcode/QRCodeWriter.java
+index 587139225..cd546d2b9 100755
+--- a/TMessagesProj/src/main/java/com/google/zxing/qrcode/QRCodeWriter.java
++++ b/TMessagesProj/src/main/java/com/google/zxing/qrcode/QRCodeWriter.java
+@@ -228,7 +228,7 @@ public final class QRCodeWriter {
+             canvas.drawBitmap(icon, imageX, imageX, null);
+             icon.recycle();
+         } else {
+-            Drawable drawable = ApplicationLoader.applicationContext.getResources().getDrawable(R.mipmap.ic_launcher_nagram_blue);
++            Drawable drawable = ApplicationLoader.applicationContext.getResources().getDrawable(R.mipmap.ic_launcher_aligram);
+             drawable.setBounds(imageX, imageX, imageX + imageSize, imageX + imageSize);
+             drawable.draw(canvas);
+         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
+index 738a4239a..a649942a8 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/NotificationsController.java
+@@ -6325,7 +6325,7 @@ public class NotificationsController extends BaseController implements Notificat
+             case 0:
+                 return R.drawable.notification;
+             case 1:
+-                return R.drawable.nagramx_notification;
++                return R.drawable.aligram_notification;
+             case 2:
+                 return R.drawable.nagram_notification;
+             case 3:
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java
+index bed7d21ef..de87caf1b 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java
+@@ -67,7 +67,7 @@ public class BlockingUpdateView extends FrameLayout implements NotificationCente
+         addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(176) + (Build.VERSION.SDK_INT >= 21 ? AndroidUtilities.statusBarHeight : 0)));
+ 
+         ImageView imageView = new ImageView(context);
+-        imageView.setImageResource(R.mipmap.ic_launcher_nagram_blue);
++        imageView.setImageResource(R.mipmap.ic_launcher_aligram);
+         imageView.setScaleType(ImageView.ScaleType.CENTER);
+         imageView.setPadding(0, 0, 0, AndroidUtilities.dp(14));
+         view.addView(imageView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER, 0, top, 0, 0));
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java b/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
+index ede6183f6..05b4e5fd1 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LauncherIconController.java
+@@ -15,13 +15,13 @@ public class LauncherIconController {
+             }
+         }
+ 
+-        setIcon(LauncherIcon.BLUE);
++        setIcon(LauncherIcon.DEFAULT);
+     }
+ 
+     public static boolean isEnabled(LauncherIcon icon) {
+         Context ctx = ApplicationLoader.applicationContext;
+         int i = ctx.getPackageManager().getComponentEnabledSetting(icon.getComponentName(ctx));
+-        return i == PackageManager.COMPONENT_ENABLED_STATE_ENABLED || i == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && icon == LauncherIcon.BLUE;
++        return i == PackageManager.COMPONENT_ENABLED_STATE_ENABLED || i == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && icon == LauncherIcon.DEFAULT;
+     }
+ 
+     public static void setIcon(LauncherIcon icon) {
+@@ -33,22 +33,11 @@ public class LauncherIconController {
+         }
+     }
+ 
++    // --- AliGram: a single launcher icon. The Nagram icon variants were
++    // removed from the manifest (BRANDING.md); the selector therefore
++    // offers only the original AliGram icon.
+     public enum LauncherIcon {
+-        DEFAULT("DefaultIcon", R.mipmap.ic_launcher_nagram, R.mipmap.icon_background_nagram, R.string.AppIconDefault),
+-        GOOGLE("GoogleIcon", R.mipmap.icon_background_google, R.mipmap.icon_foreground_google, R.string.AppIconGoogle),
+-        COLORFUL("ColorfulIcon", R.mipmap.icon_background_colorful, R.mipmap.icon_foreground_colorful, R.string.AppIconColorful),
+-        DARKGREEN("DarkGreenIcon", R.mipmap.icon_background_darkgreen, R.mipmap.icon_foreground_darkgreen, R.string.AppIconDarkGreen),
+-        NEON("NeonIcon", R.mipmap.icon_background_neon, R.mipmap.icon_foreground_neon, R.string.AppIconNeon),
+-        NIELLO("NielloIcon", R.drawable.ic_launcher_nagram_round_niello_background, R.drawable.ic_launcher_nagram_round_niello_foreground, R.string.AppIconNiello),
+-        BLUE("BlueIcon", R.color.nagram_block_round_background, R.drawable.ic_launcher_nagram_blue_foreground, R.string.AppIconBlue),
+-        DARKBLUE("DarkBlueIcon", R.color.nagram_dark_blue_background, R.drawable.ic_launcher_nagram_dark_blue_foreground, R.string.AppIconDarkBlue),
+-        BLURBLUE("BlurBlueIcon", R.drawable.ic_launcher_nagram_blur_blue_background, R.drawable.ic_launcher_nagram_blur_blue_foreground, R.string.AppIconBlurBlue),
+-        TELEGRAM("TelegramIcon", R.drawable.icon_background_sa, R.mipmap.icon_foreground_sa, R.string.AppIconTelegramOriginal),
+-        VINTAGE("VintageIcon", R.drawable.icon_6_background_sa, R.mipmap.icon_6_foreground_sa, R.string.AppIconVintage),
+-        AQUA("AquaIcon", R.drawable.icon_4_background_sa, R.mipmap.icon_foreground_sa, R.string.AppIconAqua),
+-        PREMIUM("PremiumIcon", R.drawable.icon_3_background_sa, R.mipmap.icon_3_foreground_sa, R.string.AppIconPremium),
+-        TURBO("TurboIcon", R.drawable.icon_5_background_sa, R.mipmap.icon_5_foreground_sa, R.string.AppIconTurbo),
+-        NOX("NoxIcon", R.mipmap.icon_2_background_sa, R.mipmap.icon_foreground_sa, R.string.AppIconNox);
++        DEFAULT("DefaultIcon", R.mipmap.ic_launcher_aligram, R.mipmap.ic_launcher_aligram, R.string.AppIconDefault);
+ 
+         public final String key;
+         public final int background;
+diff --git a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/utils/AndroidUtil.java b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/utils/AndroidUtil.java
+index a172e8e82..eff72f39a 100644
+--- a/TMessagesProj/src/main/java/tw/nekomimi/nekogram/utils/AndroidUtil.java
++++ b/TMessagesProj/src/main/java/tw/nekomimi/nekogram/utils/AndroidUtil.java
+@@ -352,8 +352,9 @@ public class AndroidUtil {
+ 
+     @SuppressWarnings("ConstantValue")
+     public static boolean shouldEnableCrashlytics() {
+-        return !BuildConfig.DEBUG
+-                && "nu.gpu.nagram".equals(BuildConfig.APPLICATION_ID)
+-                && !NaConfig.INSTANCE.getDisableCrashlyticsCollection().Bool();
++        // AliGram: crash reporting stays disabled — the upstream Firebase
++        // project (google-services.json) belongs to Nagram, and AliGram
++        // ships under its own applicationId.
++        return false;
+     }
+ }
+diff --git a/TMessagesProj/src/main/res/drawable-hdpi/aligram_notification.png b/TMessagesProj/src/main/res/drawable-hdpi/aligram_notification.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..166bec2245cf875d3f3e60a0fbb9a49f63e10ad7
+GIT binary patch
+literal 232
+zcmeAS@N?(olHy`uVBq!ia0vp^Dj>|k1|%Oc%$NbB)_b}*hE&XXJKdA7!GMQZ_Q?PJ
+zF?=1|O=jJ@8y*>-E}0|7m|`?je%X|uG-Cz}$0&o}92}>=8cDghta`shD(MW{(FtNp
+zQrS6}B6~6t7~E6$ZeMdNfW;-7JwswvVT0`?V@I7bhJ<9BmYMDfVK&^=tX)x`?!}v$
+zEZ&utD!1Z<)2?$9)U^~&cP%zu&AZaBr)B2vwAAn{wg~G>IV-*gK3MgJ?`TU*UYk?o
+fv;SI?BQ4o?G@At6J8RkmbUK5ltDnm{r-UW|;A&O9
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/drawable-mdpi/aligram_notification.png b/TMessagesProj/src/main/res/drawable-mdpi/aligram_notification.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..003454af08221f9dc68d0f4e8a2a822e961a79b1
+GIT binary patch
+literal 170
+zcmeAS@N?(olHy`uVBq!ia0vp^5+KaM1|%Pp+x`Gjg`O^sAr*7pPC3YTK!L;g^rrv+
+zQ_JGiZYafxRjbwN3N<c{KY6!yc4120`WZ&W*HUxRob`7(mhQjI)>Ak|jzg*>?r?XE
+z;kir92bS`zekSk0s>B?z(Xp-JoLFKr&mtC&@GBQx>X=2XSWDtVSLD|Jy~upxiH1)6
+SCv7#L<qV##elF{r5}E+$ay@DQ
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/drawable-xhdpi/aligram_notification.png b/TMessagesProj/src/main/res/drawable-xhdpi/aligram_notification.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cad7a79feeea7b89f023b001dda6fc505b88707
+GIT binary patch
+literal 299
+zcmV+`0o4A9P)<h;3K|Lk000e1NJLTq001xm001xu1^@s6R|5Hm0002;Nkl<Zc%1E*
+z$qvIH3`B>j|NqP6QuR<Z;ALza$?uv7&0-({nx<)*rYLjHd0K;s`9bpTJ6ensYubY?
+zM9ZD<F@{Lnu?AT4o!)>%xHNqr$$%zpjd&n<gffo7kOs^riZXqG*ubev$K3$!G%=(P
+zI1Dfow~7Z0BUJ7CMC3eDv?qOF(?GSf|M6Nq^ro|evHsFPB&=|@2BKT=B5Htbg1Me}
+zgsL`?z6aPrs0>tWLEV7IL_`3l5wZx0YVX)Rz`|@m_1_w}cU%or*wo=86m8ONU?ni4
+xAxZ-$M~OB<zb3LwJ^mP_^Mt>+rfHhy%LQ}bL~`MP3s3+6002ovPDHLkV1mN>g1rC$
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/drawable-xxhdpi/aligram_notification.png b/TMessagesProj/src/main/res/drawable-xxhdpi/aligram_notification.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..0be0bd6a199ae7dbb04ee6897fc433ce6f56067c
+GIT binary patch
+literal 424
+zcmV;Z0ayNsP)<h;3K|Lk000e1NJLTq002k;002k`1^@s6RqeA!0004RNkl<Zc%1E;
+zNp8b15Cls>{{Lm=l9OQBCOJz}=sJ5LOEr`L8;mi=7-Nhv#+XFT^E|uPAj$d9%zJ;M
+z7o$Q{El0$MC~+s|IF6~kKBl0o^JV*jz7aE94{R!Eq?Q#qu-S-p+@`lEXjaT>Js@0=
+z%0r!8L1E7?0rh~8pvYpP<bc44sf^McEd^ytiL3{T3sSG;6(t2#iHWWU5(QP)k|75Y
+zMr_A1dPkV`PBB^aKtMrHE9T0Sc_k^C^}wJYB{7gM2jFMq#T5%uV@Qw^RTpbmkU~Y3
+zYnUoXK~fddBi1FU`g^xMgQ{2(RDCr&s$DLqYSCRI?GgJxh@kYx{l>dySV2#{^~;Y~
+zxA;&&(VOX(0|^BwY$}qJ5sQ$dB3k|o>LyLl(w~+@>Vf2fW;UuM2RvdQNf$IygjzjN
+zRFLAvzeQ%mR3(-PdM7|t4ip!pEaHyx5xYuKmnL%tnG0$^V;f_PF~%5UOd)^aR$#SG
+S-<cQy0000<MNUMnLSTZD9k0m%
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/drawable-xxxhdpi/aligram_notification.png b/TMessagesProj/src/main/res/drawable-xxxhdpi/aligram_notification.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..706279966a6dc52f2b8d0c746f02520712fe6482
+GIT binary patch
+literal 561
+zcmeAS@N?(olHy`uVBq!ia0vp^2_VeD1|%QND7Ro>VEp0f;uumf=k0Cpyu$%J&KF-V
+z`h9<swWnL@zPd>oGt=)KP*h#Y5oKVE1cJA`{~h<2XZn`=YpV9%57jq`e6l4!P~Ya@
+z;s@Jvqo>U_f8g+}_B-31J<`8Uy<`{vaB<6eK6$;GrjWYcJy+P~aM~vQdZ;A5!04^J
+zTmFGn4;C+zXA|2{bxZkhyQ8|t&oefc>zJMPt8vV$%h<&jyZo=mYF>}OT?&c67J4$?
+z6rL|?$1#6_XZkbAoxCgf?23OmW-za6ULUlJF>7JEzrBd)0x_E_E&M0dJq&+jJzQJP
+zu{Z0NVga)i%ld@M&v%>F&#8+DaoB$0{i?(5lhs#bfAFe1_h-W)mRj$pH~mEup3l{D
+zNS$Q2@XHx*Gl!SFdl!9MW9N8un&<+vNOzI>g)iAO_8qjonjT%(6moyXD(@OL4SrV-
+z##8wbzBkxbOj+<rroYF|@zq1;0!CS;6=M4sLsd&O>%VZmQdrvXCi9Ka-w8VyGwa{n
+z(x~yUbG&=#q`@oW1<40rvX<~@2AyPcnQ~$44MCuzegs4~Jiid8b+<uOwM4(@2<NLc
+zdm4;|@6`TsT)^-{?*!+=W)H@2wcrEl!nUcu99J;R5Ph?I30K2)RUd87bq(puTKN~T
+x`tbY`JjwK+o-^2cqV55gAOA0$K>)ws%w8=Ozt*_6R|1m)gQu&X%Q~loCIBS&{C5BV
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_background.xml b/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_background.xml
+new file mode 100644
+index 000000000..bfbcbcdfa
+--- /dev/null
++++ b/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_background.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- AliGram launcher icon background (original, solid teal). -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="#0E9F8A" />
++</shape>
+diff --git a/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_foreground.xml b/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_foreground.xml
+new file mode 100644
+index 000000000..1add7710b
+--- /dev/null
++++ b/TMessagesProj/src/main/res/drawable/ic_launcher_aligram_foreground.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- AliGram launcher icon foreground: original white paper plane with a
++     teal fold line. Geometry matches the generated legacy PNGs. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="108dp"
++    android:height="108dp"
++    android:viewportWidth="512"
++    android:viewportHeight="512">
++    <path
++        android:pathData="M419.8,92.2 L81.9,235.5 L215,430.1 Z"
++        android:fillColor="#FFFFFF"
++        android:strokeColor="#00000000" />
++    <path
++        android:pathData="M419.8,92.2 L148.5,332.8"
++        android:strokeColor="#0E9F8A"
++        android:strokeWidth="12"
++        android:strokeLineCap="round"
++        android:fillColor="#00000000" />
++</vector>
+diff --git a/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram.xml b/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram.xml
+new file mode 100644
+index 000000000..9119240f4
+--- /dev/null
++++ b/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
++    <background android:drawable="@drawable/ic_launcher_aligram_background" />
++    <foreground android:drawable="@drawable/ic_launcher_aligram_foreground" />
++</adaptive-icon>
+diff --git a/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram_round.xml b/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram_round.xml
+new file mode 100644
+index 000000000..9119240f4
+--- /dev/null
++++ b/TMessagesProj/src/main/res/mipmap-anydpi-v26/ic_launcher_aligram_round.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
++    <background android:drawable="@drawable/ic_launcher_aligram_background" />
++    <foreground android:drawable="@drawable/ic_launcher_aligram_foreground" />
++</adaptive-icon>
+diff --git a/TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram.png b/TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..d63649f8044c017594f8099802804452312de736
+GIT binary patch
+literal 649
+zcmV;40(Sk0P)<h;3K|Lk000e1NJLTq002k;002k`1^@s6RqeA!0006|Nkl<Zc%1E=
+z%XPvq5JjJTvJNdm5l}=ZBD4q%B%6r%$g)188EN#nTVo&1)f)+8U;%;8@2?-qd9`_6
+zZcFMp(I>Pj<%n2W!58%=#wH|c^&RY84iK)<X>SBEE?jBaC1_MRfV*~Yi%l#+Bd5n;
+zJ6MknjLg=>Y_R|<Fw^70IGG6wFa-rzW_$VRHbKwx70>fE`#K*CV^M{Xa(diZuGfvA
+zZCbW+a)mW7$ZjJ}IY6U=j@A}#IY48Ae2cD24hKyL3Ke`Lhhw2uD=0PvQpqu>6GRc?
+zI<LEJK4tbpso|0XC=is|7Sb(cQ$-N9uoyX<=>ZB0%9-)f$uSfWlv_}&9Pac0f`Yha
+zxuzUIKu~Eh(y$5QEFx8oRC)jgLEN*eB{>F?AgO^<<VdCmNE9SFqZ;J^iJwVJ4M<yC
+zZK-;z5xU__IaiA0ry5)Xvs0r{4nTbDlRH4oEoDP~E=HA<E2m_7fWi+BTS|^0OHj&e
+za>yy29)KZ1F@tVZ4j{bE=WOFzU|EA)vzxPx$6UV@Y>V`^h!z*)BiMH_ZaFp61279Z
+zJ??KQJ;(us64ZKIZ4r5+$T9O8(gSq-6+AA)1mz?^OL_p|1W^jrBnOx+7DQYS^@dgp
+zMG~a3@L1Hem{y6!1o;GLl>=1#M6nf$x0o$SyR?<^cMYTPy4;p3i?m6N_VfT1cd-`a
+z0DppJo9!`9)VvSU%3IJ((LY-k>(PNxu^r473$PP3a*ABFdu5FBlW|`tye&3DnnE?s
+jKY0s4N=U1+C>`+&E$a@#m;So*00000NkvXXu0mjfgUt;i
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram_round.png b/TMessagesProj/src/main/res/mipmap-hdpi/ic_launcher_aligram_round.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..64a450afdf5b82c576b2a76886a80d7c19bbc844
+GIT binary patch
+literal 743
+zcmV<D0vP>?P)<h;3K|Lk000e1NJLTq002k;002k`1^@s6RqeA!00086Nkl<Zc%1E=
+zL2|+{3`KvKuFDnS5O9cch;l`^K)b1#)HtyvOO}+$Uv|Jq&tGy3t|u7j^ZV<E^7`lb
+zI%&nSrePmS1ya)}V5%P?4P{B1uv7*f1tymUDA56}z~qtyB{Gl~Fu5c^9eM}w3I~vh
+zjZN4yn3A||VmT-p9DpA)8BjzxNu1b8fFi?5qUO*HXbW(XD7iEN+7g_k)|{$<wg@Mw
+zCAU>Tk>NZ}7d%dv>g#GbeuzcnL<!3AeiIpQ@!=_&d**JL!)XP!^dMRMV<b3v8FAnw
+zl^}&Iv8CS917}HZP1>`2)*5dK4ppVxLpZ3G@Ddz}M*XkmJh`XU1#8aX0-E<CcMjr!
+zDZNj8nYVTirEk>wjRc(JB69~(8>&PzrpN>kH?bBtQl*u20LGP9>;9;u(auRshB&A<
+zp;kE3?g115NzJk)96$lkXfWEEr23C!5>z-^?g0cGBt5%coRh=?q!l;^j;4D6A|TBf
+z^#}(b{w}5!khij$%XF(z+i+6et0nSJ&r*TquJH&5U>;uR4bXE*<zk-?;zH_$GtxbP
+zzyT_XA~`3i3lL>CCE$#94<O*6mY}1;0f2+%8RO&q7P738p6BZ%(t}E~+p~<fj6X_Z
+zO?sY0WY^>pU&W;1Sh@%J10>alj`!OON_04hiHd`wm(^S<4~h~qZ(UkRFF;oRu;x*7
+z7HV6K9tU`F50C+pb`d90YdATBp_|o+dIMzXB5&>i206$&@g5ZcS*&Q*5SMaZbkN9B
+z^9lzr{6;Z~Rsm_0S`Nt?S}n(_gSPyH-I7~ViD~sC54-i6NQqmYgq0Fy!bwef3*|=5
+zfxL=EhQx`TwaiC^#ErQ-QSW`JcQU&l6g|61BDVc{oQn1fmMYq>=&ESH<gFsJ1{>v?
+Zz+a69aw!y#&+Y&K002ovPDHLkV1ll6NY?-W
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram.png b/TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a4aae556527882b088e65cdd49dfd2c1c6bb470
+GIT binary patch
+literal 445
+zcmV;u0Yd(XP)<h;3K|Lk000e1NJLTq001xm001xu1^@s6R|5Hm0004mNkl<Zc%0pt
+zTarQ{3`84hzIBVb2wlXu2;HJ?K);w`C?F&uJnT>Ir8wQmed0jqaQ}T%=UD1>zPj4+
+z;=$SAsY*tCZg4etpv>f2PFhWIHL?}hNq+`*Ngw#n>eGQ;6qvVfA-7}tv9_<kG6tTf
+z3!bM7d)|)$3rhj|__&GYPcsmw9m8`C4L6Xsi3T1RWT4dBT6n<NK<%Q;!AoRffC4JP
+zOD^PY23k|>m3)xe00*K5Km0Z-1<%cu!UF;W+_Lv>nN&>%qzkveYtjb@1DeFFlMkxC
+z%t_N}h1aGJ7`%;+ga;Z7a26WXHnEy2&|-oE-z$B9(L$v~kB{4w<bzaCVhMQ9^a18Y
+z94|gI^;ql*P_G4?xjm%1jn0M#6b5FtO)Rki>GPqtR4rr))++NKTh=Dk25NvKD%7O{
+zGh3-!3#BGTnOf%Ou2i1dhvg`wJ}Uj!`RYtRXhz5b^ltcy3d}wo*g;>lPn=DC)s4Sg
+nmt-rjVmp<XNYL5Upu+qB3a+l<@XCoe00000NkvXXu0mjfZ|uhn
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram_round.png b/TMessagesProj/src/main/res/mipmap-mdpi/ic_launcher_aligram_round.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4e55945616476fad3b8e413dfda5a02b7a653d0
+GIT binary patch
+literal 501
+zcmV<R0Sf+!P)<h;3K|Lk000e1NJLTq001xm001xu1^@s6R|5Hm0005JNkl<Zc%0>$
+zOLD?M3`E;h*5Qh92slJIM7SbcfNUaaVyqc`M^vR(RN=8+x8xsqL7+arzaEn9?#J^I
+zRnxsADKsaq8Pj4fG$)IhopwPMymjAV$C=<;l6FJXf!XkynnME>@S56P1C{Vn2G+nk
+zz>|6`n+Dzqp2RV|7^s539Zt9%PTg&`*gn#Tgd*tu^<rB8=Uh88{Wk3uUSg=dMm#^v
+zf?tn`7M?^Vri>6b+gA8isRnun<rcg}3lKj(BOnf5oBsWHUcx#cO))BYlG}g=q6cq2
+zjatXY3cj`03J(}Mply5f$gCwYU@a_x_oNRD40saDPM*|#9<Zh(h4-cp7#`|Jnh6gG
+z3}_0?8k<(44oFOB;G@z96eGkH-Cr*y$&*}HVhea=`T(%g{G8VouS}g}x|ti@7HHN+
+z$aNa6h6jEPSbi0*8XFQZn>%2=K19nkLYZJvJq<+u?b9m5WXrnazL2U1m<<mE-ON>v
+z(u)D>D6LJ*NFQK2kaawG#4)iW<T)Oq)9<kiA*=r@7zH^zh%3iQQd@KusxTp~sRqj)
+rDQ#Hl>p*5VEc^bSFMDvRc-`g)yn*b&Fkpi300000NkvXXu0mjfUsTn}
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram.png b/TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..30c82c259fd5730cb74e056dda2812c7189c0b41
+GIT binary patch
+literal 860
+zcmV-i1Ec(jP)<h;3K|Lk000e1NJLTq003YB003YJ1^@s6;+S_h0009cNkl<Zc%1E>
+zTT<gN5JhiN^F3@476FSG7BOrQHo*K~MmUxt$^BNJ@5Cved%JCjt8xJWzyJREq&SW@
+zKAv7KXOA&`fK{c}m<?n2O)0+3Xb{~mPVr;(2663qQOX~u*I6^A6i-8I8mbeJ^66-~
+zJPaV^(^GTWbqz@PxCtQJ&&QG5>%A8wwCo+{3R31ffNZ}UrR$skWv)QBUxUqgPJl8Q
+zfHId{Kf2@uD3bwn@c#IW_s3_JWB+0~Y7jQ*4{xt*pOFC^P`164&k;xl@Ws)J;g%0%
+z0M*?tAs<*cfYwFzNIn-!1<)h2CZFp<yhH%KEtYKlM(6-WB(~(|ZRh}_&E3nDln(?7
+zU}j}#teidW1DF-pBcHqdfYSiZw$(!OH(UikA*)xuMEe0J0Z_HnntZ@;0Mx6&(%LC8
+z7XYXDp5sflA21XEM=PzizC<+uPAN0;rP~iE1;E`#FY*E503_CchqY6}9)P5TS@~M+
+z2N(m8ZlAa2Z;%I|aq?&6YqlRC3P7uIqxbmt-mk%_05nJ4>&n@4>d82*22sej(0;(-
+zqlr<Pzi~PM$tF?Bx6*!qXaXcoD58A8$qI_Lc1p+s;Aqyv+bgMjYwZV!CxG$<_u?bU
+z2N+fm#fe5<IeW}q132VcZ9l*i!0ZXH)cg&$2^bB5OTOjy14dTRs`3Hm0D1(hxOPg|
+zC!iJr^*w&?=UPMMOZnAXUm|i1D1}SN_tJhqa01SLdo}wx)={|&T7B)5hzB6`G@KX2
+z1Mnz`6O|Rj^{;D>nD|ThEMDaUiUD|*Mv3YKP=9yekq|4$GwK1HX|VV90|o*B=0rx2
+z4;TqxWy}OH(&#Ad2Mh%O#1h+!sQ`fcAw&zwTmUVi$p?%E5K(julK}v?Aw&)3O7WAd
+z$s8X~FBh{D0Q_%#)b<00SI|ae`M_5IxrXG~oSUD3=zIr|Qy@p_IwwGx9|7bP@UwS(
+zGXWU_A4hI;1u1hFKu!TYHK)}H$Pnmgx$KghzqU6=Pl>y(0XYrh^g0_Bo72!{w5-$3
+m&LDm=yCq0g%c@~etmc29l3{wcMd>mC0000<MNUMnLSTYKeuJ(6
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram_round.png b/TMessagesProj/src/main/res/mipmap-xhdpi/ic_launcher_aligram_round.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..f549e21cc393f7ebb72255c8b28f1107c7966aba
+GIT binary patch
+literal 1006
+zcmV<K0}=d*P)<h;3K|Lk000e1NJLTq003YB003YJ1^@s6;+S_h000BENkl<Zc%1E>
+z&2`)`41^)SoZ}X~MR<#di-=qFHjtcX)3hj&Abtj<=9;V|elq|l?LK*<0Q&v+&p*!R
+z9=H1@eJ#?0yFf1NR-u^!aWUG^YeF!??E<`@*W_h}`AN~hm$Ej(>}2TROIaDAev)Y5
+zOKBUScJS!nOKBPLq;b&M;1lVsN!)-L;U{UVO{}bD2EQk%mLyUEtHCFdTl261E5c8b
+zSo@FxE5lD3WxzJzg8!uv7AylU_&>#E(rv&6zb+1&E(0$3=jvtDY`_J-T|KN+9!1Qi
+zkC#{aczIPhcGKP5s_9SApWokDpKrNaKK&0X!q3y5!{-=sX2Rh=t^|Lt#f-vFIx^u`
+z_t7R(t+z|TKT~xG&z}CH!MX>3L`N)_s(==lHTW9oC#qDyZ0T>^MoK3?SB>e^70?6m
+z2)<VOiFS5D(bM0X+!C%f{BlP$O$BgThGxrY)i*aHrk@M01-@46$*Uk_1&pQ@A^Az6
+z43L1;3SV>Z=K3rJ<n|+#QY84P4Z&7`bZbCrJGtNt&;;Lde5=-zv=L#nAB|LUQg3O%
+z<96R%D?qaqpu<mcF+jTqM}bddY=Fh^Lmjp?sT*JkfeYU&{X|5Y)&RCn-$?R34G^yY
+zkFt*npGe36uU^}`$3OeLhlULB9CFcyZB0YJjPpv61bl?_69xQf;w;He8aBW(NmB4p
+z(oZB*0Tv6I5k66n7BpMi$t7lhMzWsY-$db~rJqQ+0wfn$f}asSkwOcSSm?|xrxe@_
+z(14Gcej+6UxC>q>`AJV&@4@LcK?^=|`X9IZ2GN36grB5pKns8s+fFX^3aFVNy~l4o
+zFPdDwlwUpdxt@sh-wc=ow}2lZ{pLSS9R2o+dmePT?1ENrJGnj$uzFLh)vw`@m9sXl
+zfGCix<kEt)9$iP&Hv<sfr_WI&_$6bvM-h>rY3hdomQ^7A-2uAx*g`yvTUomXM5%)4
+z=_dlI01n7V@Q+kAAnJ|?QAaExDuAdj(X*tV=)?f)Dwqju(iy|k3P3X<l1VM>npzOb
+zJeUnW5zq|C6$$jHnho%7MUhPDVbxUuD6I%ty^OkBkjGtel=O4huwf#+-~&nAV6uns
+z)sDV2!eVF_beS;DV0at4vI!Dv7r75u(FCbAi-VheI7^33{7!i0YS37l%A<%GP0(7?
+z^(W0w6!uS=mx^YDRTZ1J3Uni^+oxNvMl-@|Zb1x7FEbD}3+@+CO4|$s=((USrY5c_
+cXt4M6AD^4!l>6x(U;qFB07*qoM6N<$f{{qq)Bpeg
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram.png b/TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe3cc538256ff1fbb80509388d7a12f56c4c993c
+GIT binary patch
+literal 1304
+zcmV+z1?T#SP)<h;3K|Lk000e1NJLTq0058x0058(1^@s6=SJeV000EvNkl<Zc%1Fs
+zTT<LG5JusDs62-)hDC%$B#VG8!Uo7g$`oUKk*rI1OXs}9P}b*`Jb}qg9sBw6=cDKA
+z&D#6Z^R3rwHGLt#_^2hQ>fabNzN?L?+BXAEtZG3j{wBbQT`8o8k}n2N{7TpGl0M*!
+z*_COOJ%PY8ZdcYe3lMn5FL#ZT0fA?pa@INt5P0S*b<Ix!foI-Q*8UI>c<9W)E+FvG
+z(vgLtHxh|90Wp1O-JXeWfWSk0ZP{Q8qoVErF@5N)wGk!|74->-=|ib~wZa6Vq5woi
+zJxFX{l;2{82}DH!h>8Lb6?NnM6Ti1#zxDX~*W|UCK!JPv^;?q6@JP}Rvsb3ed4RJ7
+zpdc-1mbUO%Y-Ip)-WrbN2ag0Gw{5|Z_VHK+AV-}+IKpFf9s-bqQYMJE$+H9?!%_j9
+z;o&iUvP$5rzux*$9zdPS-ELCwcnCm^yRzV^=N;?mBLS#cS0_azJQ9GaR=T}-ebPD#
+zKozR7$T@htOdknAMb(-P5hu?QfHJGOuveb6JWU@7K*`mf2qWN;0CZZ5tt9f6wGKcV
+zwOq`rcsx!Y2|#zXo&qCHo+SXO&mxxK@j88^i2?Pz^GC%aO$ey>mNDYC^|fgLd4QAq
+zb9kRV(%^us?(`_XiczB>0a-3ott~6U^pOSwWPOLvhDRCzkTsg6(GSaeg$3kkacbg;
+zG<~FifIPvG=Efrh0^|*jH1D?cHP?W=E=G&T^oY|(atg>R9Eqv3&J`f<3(*Qs)afHR
+z0OTFb5_q;V0~7_0#I|)*cR<lDd`mphr;pSLP&714OrG<a0*ZREd;Dwq2-8Pu{4u`~
+zFA{k2GJgv56kAq)%|B>7%H7rrPn7GCT9;3%_kPisJlC84zdGoN$NP<RrEY*cUOe!W
+z*L4DUx`=FBb(-!e%;GO5Jl#08>wX5ZyqMsrpUENG;-c<tS!`QnnLUN|L}Yc|8GZUl
+z6FkOqSZ<pspw@S&C7v0kkK|wiwYt#Y>C<qJ@iTp}frrc|kW}xE^?+xl=_5G-B$Z!y
+z9@A}d1E?e~Pg=80AITY@D+>S~+gt&X@)p7io|$t8C^b)bW}QBgQ$S}6;t9{}xdbF_
+zBYAxN>kiM%(?@a)Xq|`mc-GC1M{*8mSs>oy@tbQvlHc<V)8~Kg0j&d%uR;OxfQRl2
+z1;|58pZh`qV)6VH3XpXG{$4mhR*MLp?ZN?)SWHia1k^jg?iUsii|V7WfTTW%fO=eL
+zK&=DMdEo)E$hL(CB(*^V%(R98M0O1WsOH3A`lL4uAgRv6gD0<{08#&j15`3Wm_GRp
+z2S}>-7p`>PkbopW^lDf@If3nZLjwXv`-TQ2UHda>N^f{TM}eojhxe!FoAnRTI-s=a
+z{ptBO%>-H_0#%)+0Yq(@3eeGqHPE#_&p$t3{(M;eAQY?R>^#*3qWS@diuwdJ!{a>F
+z>8lkc5EXR?h$%#8t&K2&sHks%m_oGImW|B`1R`3uXM!z^irNLl6r!ag3x^X3M0950
+zbPEH~yrryt(isRu^Od^h$%kkV%~Q@=XFY|1X#8^5IQuakMB{d4ZHqAQOK4+MG8Bs5
+zNMsttuXGKo0bm-%s@Bb4eS!eVceQtordtr0eAM!&(e(@is6O>PoBjin_8Zh+`lj{(
+O0000<MNUMnLSTZLo@kZ;
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram_round.png b/TMessagesProj/src/main/res/mipmap-xxhdpi/ic_launcher_aligram_round.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..10acbbdcd3379bd8882417c9f63df55db5520007
+GIT binary patch
+literal 1548
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram.png b/TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c32201fd65c71298c7ded924c1fd0ad3965cef84
+GIT binary patch
+literal 1784
+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
+U(>F=M$V3B2e1b?1y<;x_7fBvEn*aa+
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram_round.png b/TMessagesProj/src/main/res/mipmap-xxxhdpi/ic_launcher_aligram_round.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..5388a446db166fb854719249f507d9a4ea3ae04b
+GIT binary patch
+literal 2156
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/TMessagesProj/src/main/res/values-ar/strings.xml b/TMessagesProj/src/main/res/values-ar/strings.xml
+index 368579c91..5d4a80903 100644
+--- a/TMessagesProj/src/main/res/values-ar/strings.xml
++++ b/TMessagesProj/src/main/res/values-ar/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">(Beta) تيليجرام</string>
+     <string name="LanguageName">العربية</string>
+     <string name="English">الإنجليزية</string>
+diff --git a/TMessagesProj/src/main/res/values-de/strings.xml b/TMessagesProj/src/main/res/values-de/strings.xml
+index 76733b70a..8930ebb84 100644
+--- a/TMessagesProj/src/main/res/values-de/strings.xml
++++ b/TMessagesProj/src/main/res/values-de/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram Beta</string>
+     <string name="LanguageName">Deutsch</string>
+     <string name="English">Englisch</string>
+diff --git a/TMessagesProj/src/main/res/values-es-rES/strings_na.xml b/TMessagesProj/src/main/res/values-es-rES/strings_na.xml
+index 3f3523e18..70a87ed2b 100644
+--- a/TMessagesProj/src/main/res/values-es-rES/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-es-rES/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Enviar reacción</string>
+     <string name="ShowReactions">Mostrar reacciones</string>
+     <string name="CustomTitle">Título personalizado</string>
+-    <string name="CustomTitleHint">Dejar en blanco para usar Nagram X</string>
++    <string name="CustomTitleHint">Dejar en blanco para usar AliGram</string>
+     <string name="CreateMono">Crear Monoespacio</string>
+     <string name="CreateMonoLanguage">Idioma del código</string>
+     <string name="CopyPhoto">Copiar Foto</string>
+diff --git a/TMessagesProj/src/main/res/values-es-rES/strings_nax.xml b/TMessagesProj/src/main/res/values-es-rES/strings_nax.xml
+index 21daa33a7..082862001 100644
+--- a/TMessagesProj/src/main/res/values-es-rES/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-es-rES/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Primavera</string>
+     <string name="BackAnimationPredictive">Predictivo</string>
+     <string name="AddToFilter">Añadir al filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nunca recibiste notificaciones con UnifiedPush desde que se inició Nagram X.</string>
+-    <string name="UnifiedPushLastReceivedNotification">La última notificación recibida con UnifiedPush fue hace %1$d segundos.\n\nHas recibido %2$d notificaciones desde que Nagram X se inició.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Nunca recibiste notificaciones con UnifiedPush desde que se inició AliGram.</string>
++    <string name="UnifiedPushLastReceivedNotification">La última notificación recibida con UnifiedPush fue hace %1$d segundos.\n\nHas recibido %2$d notificaciones desde que AliGram se inició.</string>
+     <string name="UnifiedPushCurrentEndpoint">El endpoint UnifiedPush actual es: %1$s</string>
+     <string name="PlayOnce">Reproducir una vez</string>
+     <string name="StorageSettings">Almacenamiento</string>
+diff --git a/TMessagesProj/src/main/res/values-es/strings.xml b/TMessagesProj/src/main/res/values-es/strings.xml
+index f459414f0..8acd8466d 100644
+--- a/TMessagesProj/src/main/res/values-es/strings.xml
++++ b/TMessagesProj/src/main/res/values-es/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram Beta</string>
+     <string name="LanguageName">Español</string>
+     <string name="English">Inglés</string>
+diff --git a/TMessagesProj/src/main/res/values-fa-rIR/strings_na.xml b/TMessagesProj/src/main/res/values-fa-rIR/strings_na.xml
+index 8b0dc9d26..30bff491e 100644
+--- a/TMessagesProj/src/main/res/values-fa-rIR/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-fa-rIR/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">ارسال واکنش‌ها</string>
+     <string name="ShowReactions">نمایش واکنش‌ها</string>
+     <string name="CustomTitle">عنوان سفارشی</string>
+-    <string name="CustomTitleHint">خالی بگذارید تا از Nagram X استفاده شود</string>
++    <string name="CustomTitleHint">خالی بگذارید تا از AliGram استفاده شود</string>
+     <string name="CreateMono">ایجاد Monospace</string>
+     <string name="CreateMonoLanguage">زبان کد</string>
+     <string name="CopyPhoto">کپی‌ کردن عکس</string>
+diff --git a/TMessagesProj/src/main/res/values-in-rID/strings_na.xml b/TMessagesProj/src/main/res/values-in-rID/strings_na.xml
+index 6a1d8d6f6..4eed46f5c 100644
+--- a/TMessagesProj/src/main/res/values-in-rID/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-in-rID/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Kirim Reaksi</string>
+     <string name="ShowReactions">Tampilkan Reaksi</string>
+     <string name="CustomTitle">Judul Khusus</string>
+-    <string name="CustomTitleHint">Biarkan kosong untuk menggunakan Nagram X</string>
++    <string name="CustomTitleHint">Biarkan kosong untuk menggunakan AliGram</string>
+     <string name="CreateMono">Buat Monospace</string>
+     <string name="CreateMonoLanguage">Bahasa Kode</string>
+     <string name="CopyPhoto">Salin Foto</string>
+diff --git a/TMessagesProj/src/main/res/values-in-rID/strings_nax.xml b/TMessagesProj/src/main/res/values-in-rID/strings_nax.xml
+index d763c1089..b91890dc8 100644
+--- a/TMessagesProj/src/main/res/values-in-rID/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-in-rID/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Musim Semi</string>
+     <string name="BackAnimationPredictive">Perkiraan</string>
+     <string name="AddToFilter">Tambah ke Penyaring</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Anda tidak pernah menerima pemberitahuan dengan UnifiedPush sejak Nagram X dimulai.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Pemberitahuan terakhir yang diterima dengan UnifiedPush adalah %1$d detik yang lalu.\n\nAnda menerima %2$d pemberitahuan sejak Nagram X dimulai.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Anda tidak pernah menerima pemberitahuan dengan UnifiedPush sejak AliGram dimulai.</string>
++    <string name="UnifiedPushLastReceivedNotification">Pemberitahuan terakhir yang diterima dengan UnifiedPush adalah %1$d detik yang lalu.\n\nAnda menerima %2$d pemberitahuan sejak AliGram dimulai.</string>
+     <string name="UnifiedPushCurrentEndpoint">Titik akhir UnifiedPush saat ini adalah: %1$s</string>
+     <string name="PlayOnce">Putar sekali</string>
+     <string name="StorageSettings">Penyimpanan</string>
+diff --git a/TMessagesProj/src/main/res/values-it-rIT/strings_na.xml b/TMessagesProj/src/main/res/values-it-rIT/strings_na.xml
+index 7c7abf687..1baa27ab7 100644
+--- a/TMessagesProj/src/main/res/values-it-rIT/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-it-rIT/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Manda Reazioni</string>
+     <string name="ShowReactions">Mostra Reazioni</string>
+     <string name="CustomTitle">Titolo Personalizzato</string>
+-    <string name="CustomTitleHint">Lascia vuoto per usare Nagram X</string>
++    <string name="CustomTitleHint">Lascia vuoto per usare AliGram</string>
+     <string name="CreateMono">Crea monospazio</string>
+     <string name="CreateMonoLanguage">Linguaggio Codice</string>
+     <string name="CopyPhoto">Copia foto</string>
+diff --git a/TMessagesProj/src/main/res/values-it-rIT/strings_nax.xml b/TMessagesProj/src/main/res/values-it-rIT/strings_nax.xml
+index 98e66da62..7c2c2550a 100644
+--- a/TMessagesProj/src/main/res/values-it-rIT/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-it-rIT/strings_nax.xml
+@@ -313,8 +313,8 @@ Non possiamo aiutarti in questo caso; se hai problemi di accesso, contatta il Su
+     <string name="BackAnimationSpring">Rimbalzo</string>
+     <string name="BackAnimationPredictive">Predittiva</string>
+     <string name="AddToFilter">Aggiungi al filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Non hai mai ricevuto notifiche con UnifiedPush da quando è stato avviato Nagram X.</string>
+-    <string name="UnifiedPushLastReceivedNotification">L\'ultima notifica ricevuta con UnifiedPush è stata %1$d secondi fa.\n\nHai ricevuto %2$d notifiche da quando è stato avviato Nagram X.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Non hai mai ricevuto notifiche con UnifiedPush da quando è stato avviato AliGram.</string>
++    <string name="UnifiedPushLastReceivedNotification">L\'ultima notifica ricevuta con UnifiedPush è stata %1$d secondi fa.\n\nHai ricevuto %2$d notifiche da quando è stato avviato AliGram.</string>
+     <string name="UnifiedPushCurrentEndpoint">L\'endpoint UnifiedPush corrente è: %1$s</string>
+     <string name="PlayOnce">Esegui una volta</string>
+     <string name="StorageSettings">Archiviazione</string>
+diff --git a/TMessagesProj/src/main/res/values-it/strings.xml b/TMessagesProj/src/main/res/values-it/strings.xml
+index eb31dd4fb..ad87d5c31 100644
+--- a/TMessagesProj/src/main/res/values-it/strings.xml
++++ b/TMessagesProj/src/main/res/values-it/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram Beta</string>
+     <string name="LanguageName">Italiano</string>
+     <string name="English">Inglese</string>
+diff --git a/TMessagesProj/src/main/res/values-ja-rJP/strings_na.xml b/TMessagesProj/src/main/res/values-ja-rJP/strings_na.xml
+index 42f0e21e4..0fa8dac2d 100644
+--- a/TMessagesProj/src/main/res/values-ja-rJP/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-ja-rJP/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">リアクションを送信</string>
+     <string name="ShowReactions">リアクションメニューを表示</string>
+     <string name="CustomTitle">カスタムタイトル</string>
+-    <string name="CustomTitleHint">空白のままにすると、Nagram X が使用されます</string>
++    <string name="CustomTitleHint">空白のままにすると、AliGram が使用されます</string>
+     <string name="CreateMono">等幅フォントを作成</string>
+     <string name="CreateMonoLanguage">等幅フォントの言語</string>
+     <string name="CopyPhoto">画像をコピー</string>
+diff --git a/TMessagesProj/src/main/res/values-ja-rJP/strings_nax.xml b/TMessagesProj/src/main/res/values-ja-rJP/strings_nax.xml
+index c74bacb52..78e9a7966 100644
+--- a/TMessagesProj/src/main/res/values-ja-rJP/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-ja-rJP/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">予測型</string>
+     <string name="AddToFilter">フィルターに追加</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nagram X の起動以降、UnifiedPush 経由で通知を受信したことはありません。</string>
+-    <string name="UnifiedPushLastReceivedNotification">UnifiedPush で最後に受信した通知は %1$d 秒前です。\n\nNagram X の起動以降、 %2$d 件の通知を受信しました。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">AliGram の起動以降、UnifiedPush 経由で通知を受信したことはありません。</string>
++    <string name="UnifiedPushLastReceivedNotification">UnifiedPush で最後に受信した通知は %1$d 秒前です。\n\nAliGram の起動以降、 %2$d 件の通知を受信しました。</string>
+     <string name="UnifiedPushCurrentEndpoint">現在の UnifiedPush エンドポイントは：%1$s</string>
+     <string name="PlayOnce">ワンショット</string>
+     <string name="StorageSettings">ストレージ</string>
+diff --git a/TMessagesProj/src/main/res/values-ko/strings.xml b/TMessagesProj/src/main/res/values-ko/strings.xml
+index 77e4b9199..a8a66288a 100644
+--- a/TMessagesProj/src/main/res/values-ko/strings.xml
++++ b/TMessagesProj/src/main/res/values-ko/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">텔레그램</string>
+     <string name="LanguageName">한국어</string>
+     <string name="English">영어</string>
+diff --git a/TMessagesProj/src/main/res/values-ko/strings_na.xml b/TMessagesProj/src/main/res/values-ko/strings_na.xml
+index 6ca6a437c..657f8b6d4 100644
+--- a/TMessagesProj/src/main/res/values-ko/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-ko/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">반응 보내기</string>
+     <string name="ShowReactions">반응 표시</string>
+     <string name="CustomTitle">사용자 지정 제목</string>
+-    <string name="CustomTitleHint">비워 두면 Nagram X를 사용합니다</string>
++    <string name="CustomTitleHint">비워 두면 AliGram를 사용합니다</string>
+     <string name="CreateMono">고정폭 만들기</string>
+     <string name="CreateMonoLanguage">코드 언어</string>
+     <string name="CopyPhoto">사진 복사</string>
+diff --git a/TMessagesProj/src/main/res/values-ko/strings_nax.xml b/TMessagesProj/src/main/res/values-ko/strings_nax.xml
+index 097531152..2df4dd94c 100644
+--- a/TMessagesProj/src/main/res/values-ko/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-ko/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">스프링</string>
+     <string name="BackAnimationPredictive">예측형</string>
+     <string name="AddToFilter">필터에 추가</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nagram X가 시작된 이후 UnifiedPush로 알림을 받은 적이 없습니다.</string>
+-    <string name="UnifiedPushLastReceivedNotification">마지막으로 UnifiedPush 알림을 받은 것은 %1$d초 전입니다.\n\nNagram X가 시작된 이후 %2$d개의 알림을 받았습니다.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">AliGram가 시작된 이후 UnifiedPush로 알림을 받은 적이 없습니다.</string>
++    <string name="UnifiedPushLastReceivedNotification">마지막으로 UnifiedPush 알림을 받은 것은 %1$d초 전입니다.\n\nAliGram가 시작된 이후 %2$d개의 알림을 받았습니다.</string>
+     <string name="UnifiedPushCurrentEndpoint">현재 UnifiedPush 엔드포인트: %1$s</string>
+     <string name="PlayOnce">한 번 재생</string>
+     <string name="StorageSettings">저장소</string>
+diff --git a/TMessagesProj/src/main/res/values-nl/strings.xml b/TMessagesProj/src/main/res/values-nl/strings.xml
+index 77dbef631..a89896de7 100644
+--- a/TMessagesProj/src/main/res/values-nl/strings.xml
++++ b/TMessagesProj/src/main/res/values-nl/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram-bèta</string>
+     <string name="LanguageName">Nederlands</string>
+     <string name="English">Engels</string>
+diff --git a/TMessagesProj/src/main/res/values-pl-rPL/strings_na.xml b/TMessagesProj/src/main/res/values-pl-rPL/strings_na.xml
+index aa82330ac..25eaf4c34 100644
+--- a/TMessagesProj/src/main/res/values-pl-rPL/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-pl-rPL/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Reakcje</string>
+     <string name="ShowReactions">Pokaż reakcje</string>
+     <string name="CustomTitle">Tytuł niestandardowy</string>
+-    <string name="CustomTitleHint">Pozostaw puste, aby użyć Nagram X</string>
++    <string name="CustomTitleHint">Pozostaw puste, aby użyć AliGram</string>
+     <string name="CreateMono">Utwórz przestrzeń mono</string>
+     <string name="CreateMonoLanguage">Kod języka</string>
+     <string name="CopyPhoto">Kopiuj zdjęcie</string>
+diff --git a/TMessagesProj/src/main/res/values-pl-rPL/strings_nax.xml b/TMessagesProj/src/main/res/values-pl-rPL/strings_nax.xml
+index 207b46873..e811761f2 100644
+--- a/TMessagesProj/src/main/res/values-pl-rPL/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-pl-rPL/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Efekt sprężyny</string>
+     <string name="BackAnimationPredictive">Predictive</string>
+     <string name="AddToFilter">Dodaj do filtra</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Od uruchomienia Nagram X nie otrzymano powiadomień przez UnifiedPush.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Ostatnie powiadomienie przez UnifiedPush otrzymano %1$d s temu.\n\nOd uruchomienia Nagram X otrzymano %2$d powiadomień.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Od uruchomienia AliGram nie otrzymano powiadomień przez UnifiedPush.</string>
++    <string name="UnifiedPushLastReceivedNotification">Ostatnie powiadomienie przez UnifiedPush otrzymano %1$d s temu.\n\nOd uruchomienia AliGram otrzymano %2$d powiadomień.</string>
+     <string name="UnifiedPushCurrentEndpoint">Aktualny punkt końcowy UnifiedPush to: %1$s</string>
+     <string name="PlayOnce">Odtwórz raz</string>
+     <string name="StorageSettings">Pamięć</string>
+diff --git a/TMessagesProj/src/main/res/values-pt-rBR/strings.xml b/TMessagesProj/src/main/res/values-pt-rBR/strings.xml
+index 280d19548..e0dc2266d 100644
+--- a/TMessagesProj/src/main/res/values-pt-rBR/strings.xml
++++ b/TMessagesProj/src/main/res/values-pt-rBR/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram Beta</string>
+     <string name="LanguageName">Português (Brasil)</string>
+     <string name="English">Inglês</string>
+diff --git a/TMessagesProj/src/main/res/values-pt-rBR/strings_na.xml b/TMessagesProj/src/main/res/values-pt-rBR/strings_na.xml
+index 6c3507c55..3b07735be 100644
+--- a/TMessagesProj/src/main/res/values-pt-rBR/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-pt-rBR/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Enviar reações</string>
+     <string name="ShowReactions">Mostrar reações</string>
+     <string name="CustomTitle">Título personalizado</string>
+-    <string name="CustomTitleHint">Deixe em branco para usar o Nagram X</string>
++    <string name="CustomTitleHint">Deixe em branco para usar o AliGram</string>
+     <string name="CreateMono">Criar monoespaço</string>
+     <string name="CreateMonoLanguage">Linguagem de código</string>
+     <string name="CopyPhoto">Copiar foto</string>
+diff --git a/TMessagesProj/src/main/res/values-pt-rBR/strings_nax.xml b/TMessagesProj/src/main/res/values-pt-rBR/strings_nax.xml
+index 4e496851f..11a722718 100644
+--- a/TMessagesProj/src/main/res/values-pt-rBR/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-pt-rBR/strings_nax.xml
+@@ -308,8 +308,8 @@
+     <string name="BackAnimationSpring">Mola</string>
+     <string name="BackAnimationPredictive">Preditiva</string>
+     <string name="AddToFilter">Adicionar ao filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Você não recebeu notificações via UnifiedPush desde que o Nagram X foi iniciado.</string>
+-    <string name="UnifiedPushLastReceivedNotification">A última notificação recebida via UnifiedPush foi há %1$d segundos.\n\nVocê recebeu %2$d notificações desde que o Nagram X foi iniciado.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Você não recebeu notificações via UnifiedPush desde que o AliGram foi iniciado.</string>
++    <string name="UnifiedPushLastReceivedNotification">A última notificação recebida via UnifiedPush foi há %1$d segundos.\n\nVocê recebeu %2$d notificações desde que o AliGram foi iniciado.</string>
+     <string name="UnifiedPushCurrentEndpoint">O endpoint atual do UnifiedPush é: %1$s</string>
+     <string name="PlayOnce">Reproduzir uma vez</string>
+     <string name="StorageSettings">Armazenamento</string>
+diff --git a/TMessagesProj/src/main/res/values-ru-rRU/strings_na.xml b/TMessagesProj/src/main/res/values-ru-rRU/strings_na.xml
+index d85f79e6a..2bead60ef 100644
+--- a/TMessagesProj/src/main/res/values-ru-rRU/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-ru-rRU/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Отправить реакцию</string>
+     <string name="ShowReactions">Показать реакции</string>
+     <string name="CustomTitle">Пользовательский заголовок</string>
+-    <string name="CustomTitleHint">Оставьте поле пустым, чтобы использовать «Nagram X»</string>
++    <string name="CustomTitleHint">Оставьте поле пустым, чтобы использовать «AliGram»</string>
+     <string name="CreateMono">Создать монопространство</string>
+     <string name="CreateMonoLanguage">Язык кода</string>
+     <string name="CopyPhoto">Копировать фото</string>
+diff --git a/TMessagesProj/src/main/res/values-ru-rRU/strings_nax.xml b/TMessagesProj/src/main/res/values-ru-rRU/strings_nax.xml
+index f1a98060c..fdebe85e6 100644
+--- a/TMessagesProj/src/main/res/values-ru-rRU/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-ru-rRU/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">Предиктивная</string>
+     <string name="AddToFilter">Добавить в фильтр</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">С момента запуска Nagram X вы не получали уведомлений с помощью UnifiedPush.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Последнее уведомление, полученное с помощью UnifiedPush, было %1$d секунд назад.\n\nС момента запуска Nagram X вы получили %2$d уведомлений.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">С момента запуска AliGram вы не получали уведомлений с помощью UnifiedPush.</string>
++    <string name="UnifiedPushLastReceivedNotification">Последнее уведомление, полученное с помощью UnifiedPush, было %1$d секунд назад.\n\nС момента запуска AliGram вы получили %2$d уведомлений.</string>
+     <string name="UnifiedPushCurrentEndpoint">Текущая конечная точка UnifiedPush: %1$s</string>
+     <string name="PlayOnce">Играть один раз</string>
+     <string name="StorageSettings">Хранилище</string>
+diff --git a/TMessagesProj/src/main/res/values-tr-rTR/strings_na.xml b/TMessagesProj/src/main/res/values-tr-rTR/strings_na.xml
+index 7b7f2572f..5d2cfe376 100644
+--- a/TMessagesProj/src/main/res/values-tr-rTR/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-tr-rTR/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Tepki Gönder</string>
+     <string name="ShowReactions">Tepkileri Göster</string>
+     <string name="CustomTitle">Özel Başlık</string>
+-    <string name="CustomTitleHint">Nagram X kullanmak için boş bırakın</string>
++    <string name="CustomTitleHint">AliGram kullanmak için boş bırakın</string>
+     <string name="CreateMono">Eşaralıklı (Monospace) Oluştur</string>
+     <string name="CreateMonoLanguage">Kod Dili</string>
+     <string name="CopyPhoto">Fotoğrafı Kopyala</string>
+diff --git a/TMessagesProj/src/main/res/values-tr-rTR/strings_nax.xml b/TMessagesProj/src/main/res/values-tr-rTR/strings_nax.xml
+index b4a2c60cb..6bbe51764 100644
+--- a/TMessagesProj/src/main/res/values-tr-rTR/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-tr-rTR/strings_nax.xml
+@@ -308,8 +308,8 @@
+     <string name="BackAnimationSpring">Yay (Spring)</string>
+     <string name="BackAnimationPredictive">Öngörücü</string>
+     <string name="AddToFilter">Filtreye Ekle</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nagram X başlatıldığından beri UnifiedPush ile hiç bildirim almadınız.</string>
+-    <string name="UnifiedPushLastReceivedNotification">UnifiedPush ile en son alınan bildirim %1$d saniye önceydi.\n\nNagram X başlatıldığından beri %2$d bildirim aldınız.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">AliGram başlatıldığından beri UnifiedPush ile hiç bildirim almadınız.</string>
++    <string name="UnifiedPushLastReceivedNotification">UnifiedPush ile en son alınan bildirim %1$d saniye önceydi.\n\nAliGram başlatıldığından beri %2$d bildirim aldınız.</string>
+     <string name="UnifiedPushCurrentEndpoint">Mevcut UnifiedPush uç noktası: %1$s</string>
+     <string name="PlayOnce">Bir kez oynat</string>
+     <string name="StorageSettings">Depolama</string>
+diff --git a/TMessagesProj/src/main/res/values-uk-rUA/strings_na.xml b/TMessagesProj/src/main/res/values-uk-rUA/strings_na.xml
+index 661260bd8..f64675b2e 100644
+--- a/TMessagesProj/src/main/res/values-uk-rUA/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-uk-rUA/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Надсилати реакції</string>
+     <string name="ShowReactions">Показати реакції</string>
+     <string name="CustomTitle">Свій заголовок</string>
+-    <string name="CustomTitleHint">Залиште порожнім, щоб використовувати Nagram X</string>
++    <string name="CustomTitleHint">Залиште порожнім, щоб використовувати AliGram</string>
+     <string name="CreateMono">Створити монопростір</string>
+     <string name="CreateMonoLanguage">Мова коду</string>
+     <string name="CopyPhoto">Копіювати фото</string>
+diff --git a/TMessagesProj/src/main/res/values-uk-rUA/strings_nax.xml b/TMessagesProj/src/main/res/values-uk-rUA/strings_nax.xml
+index ff0d34b8a..35316912a 100644
+--- a/TMessagesProj/src/main/res/values-uk-rUA/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-uk-rUA/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Пружна</string>
+     <string name="BackAnimationPredictive">Прогнозована</string>
+     <string name="AddToFilter">Додати до фільтра</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">З моменту запуску Nagram X сповіщень через UnifiedPush не надходило.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Останнє сповіщення через UnifiedPush надійшло %1$d сек. тому.\n\nВи отримали %2$d сповіщень з моменту запуску Nagram X.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">З моменту запуску AliGram сповіщень через UnifiedPush не надходило.</string>
++    <string name="UnifiedPushLastReceivedNotification">Останнє сповіщення через UnifiedPush надійшло %1$d сек. тому.\n\nВи отримали %2$d сповіщень з моменту запуску AliGram.</string>
+     <string name="UnifiedPushCurrentEndpoint">Поточна кінцева точка UnifiedPush: %1$s</string>
+     <string name="PlayOnce">Відтворити один раз</string>
+     <string name="StorageSettings">Сховище</string>
+diff --git a/TMessagesProj/src/main/res/values-vi-rVN/strings_na.xml b/TMessagesProj/src/main/res/values-vi-rVN/strings_na.xml
+index 60e9b7432..8b5583133 100644
+--- a/TMessagesProj/src/main/res/values-vi-rVN/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-vi-rVN/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Gửi Phản ứng</string>
+     <string name="ShowReactions">Hiện phản ứng</string>
+     <string name="CustomTitle">Tùy chỉnh Tiêu Đề</string>
+-    <string name="CustomTitleHint">Để trống để sử dụng Nagram X</string>
++    <string name="CustomTitleHint">Để trống để sử dụng AliGram</string>
+     <string name="CreateMono">Tạo Monospace</string>
+     <string name="CreateMonoLanguage">Ngôn ngữ code</string>
+     <string name="CopyPhoto">Sao chép Ảnh</string>
+diff --git a/TMessagesProj/src/main/res/values-vi-rVN/strings_nax.xml b/TMessagesProj/src/main/res/values-vi-rVN/strings_nax.xml
+index 9091eb843..4b964a4cc 100644
+--- a/TMessagesProj/src/main/res/values-vi-rVN/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-vi-rVN/strings_nax.xml
+@@ -296,8 +296,8 @@
+     <string name="BackAnimationClassic">Cổ điển</string>
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">Dự đoán</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Bạn chưa từng nhận được thông báo nào từ UnifiedPush kể từ khi Nagram X được khởi chạy.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Thông báo gần nhất nhận được qua UnifiedPush là từ %1$d giây trước.\n\nBạn đã nhận được %2$d thông báo kể từ khi Nagram X khởi động.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Bạn chưa từng nhận được thông báo nào từ UnifiedPush kể từ khi AliGram được khởi chạy.</string>
++    <string name="UnifiedPushLastReceivedNotification">Thông báo gần nhất nhận được qua UnifiedPush là từ %1$d giây trước.\n\nBạn đã nhận được %2$d thông báo kể từ khi AliGram khởi động.</string>
+     <string name="StorageSettings">Bộ nhớ</string>
+     <string name="TranslatorWithOriginalTextOff">Tắt</string>
+     <string name="TranslatorWithOriginalTextOn">Bật</string>
+diff --git a/TMessagesProj/src/main/res/values-vi-rVN/strings_neko.xml b/TMessagesProj/src/main/res/values-vi-rVN/strings_neko.xml
+index 9efddfdc4..2d627b328 100644
+--- a/TMessagesProj/src/main/res/values-vi-rVN/strings_neko.xml
++++ b/TMessagesProj/src/main/res/values-vi-rVN/strings_neko.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="NekoSettings">Cài đặt Nagram X</string>
++    <string name="NekoSettings">Cài đặt AliGram</string>
+     <string name="IPv6">Ưu tiên IPv6</string>
+     <string name="MessageMenu">Menu tin nhắn</string>
+     <string name="HidePhone">Ẩn số điện thoại</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rCN/strings_na.xml b/TMessagesProj/src/main/res/values-zh-rCN/strings_na.xml
+index f35fb1c5c..76ba98098 100644
+--- a/TMessagesProj/src/main/res/values-zh-rCN/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-zh-rCN/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">表情回应</string>
+     <string name="ShowReactions">显示表情回应菜单</string>
+     <string name="CustomTitle">自定义标题</string>
+-    <string name="CustomTitleHint">留空则使用 Nagram X</string>
++    <string name="CustomTitleHint">留空则使用 AliGram</string>
+     <string name="CreateMono">创建等宽</string>
+     <string name="CreateMonoLanguage">等宽语言</string>
+     <string name="CopyPhoto">复制图片</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rCN/strings_nax.xml b/TMessagesProj/src/main/res/values-zh-rCN/strings_nax.xml
+index ae8fe3688..08cb2107f 100644
+--- a/TMessagesProj/src/main/res/values-zh-rCN/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-zh-rCN/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">预测</string>
+     <string name="AddToFilter">添加过滤器</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">自 Nagram X 启动后，您从未收到 UnifiedPush 的通知。</string>
+-    <string name="UnifiedPushLastReceivedNotification">最后一次通过 UnifiedPush 接收到的通知是 %1$d 秒前。\n\n自 Nagram X 启动以来，您已收到 %2$d 条通知。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">自 AliGram 启动后，您从未收到 UnifiedPush 的通知。</string>
++    <string name="UnifiedPushLastReceivedNotification">最后一次通过 UnifiedPush 接收到的通知是 %1$d 秒前。\n\n自 AliGram 启动以来，您已收到 %2$d 条通知。</string>
+     <string name="UnifiedPushCurrentEndpoint">当前的 UnifiedPush 端点是：%1$s</string>
+     <string name="PlayOnce">播放一次</string>
+     <string name="StorageSettings">存储</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rTW/strings_na.xml b/TMessagesProj/src/main/res/values-zh-rTW/strings_na.xml
+index 9a7784b2c..8565096b3 100644
+--- a/TMessagesProj/src/main/res/values-zh-rTW/strings_na.xml
++++ b/TMessagesProj/src/main/res/values-zh-rTW/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">表情符號反應</string>
+     <string name="ShowReactions">顯示表情符號反應選單</string>
+     <string name="CustomTitle">自訂標題</string>
+-    <string name="CustomTitleHint">留空則使用 Nagram X</string>
++    <string name="CustomTitleHint">留空則使用 AliGram</string>
+     <string name="CreateMono">建立等寬</string>
+     <string name="CreateMonoLanguage">等寬語言</string>
+     <string name="CopyPhoto">複製圖片</string>
+@@ -64,7 +64,7 @@
+     <string name="CenterActionBarTitleType">標題置中</string>
+     <string name="ShowQuickReplyInBotCommands">在與機器人聊天時顯示快速回覆按鈕</string>
+     <string name="PushServiceType">推播服務類型</string>
+-    <string name="PushServiceTypeInApp">Nagram X</string>
++    <string name="PushServiceTypeInApp">AliGram</string>
+     <string name="PushServiceTypeInAppDialog">使用常駐通知</string>
+     <string name="SendMp4DocumentAsVideo">MP4 影片作為檔案傳送時可預覽</string>
+     <string name="StickersChooseShortNameForStickerPack">為您的貼圖包選擇一個簡短的名稱</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rTW/strings_nax.xml b/TMessagesProj/src/main/res/values-zh-rTW/strings_nax.xml
+index fa9459450..cb1773a12 100644
+--- a/TMessagesProj/src/main/res/values-zh-rTW/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values-zh-rTW/strings_nax.xml
+@@ -309,8 +309,8 @@
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">預測</string>
+     <string name="AddToFilter">新增過濾器</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">自 Nagram X 啟動後，您從未收到 UnifiedPush 的通知。</string>
+-    <string name="UnifiedPushLastReceivedNotification">最後一次透過 UnifiedPush 接收到的通知是 %1$d 秒前。\n\n自 Nagram X 啟動以來，您已收到 %2$d 條通知。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">自 AliGram 啟動後，您從未收到 UnifiedPush 的通知。</string>
++    <string name="UnifiedPushLastReceivedNotification">最後一次透過 UnifiedPush 接收到的通知是 %1$d 秒前。\n\n自 AliGram 啟動以來，您已收到 %2$d 條通知。</string>
+     <string name="UnifiedPushCurrentEndpoint">目前的 UnifiedPush 端點是：%1$s</string>
+     <string name="PlayOnce">播放一次</string>
+     <string name="StorageSettings">儲存</string>
+diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
+index ce52fbd1c..c8d178730 100644
+--- a/TMessagesProj/src/main/res/values/strings.xml
++++ b/TMessagesProj/src/main/res/values/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="AppName">Nagram X</string>
++    <string name="AppName">AliGram</string>
+     <string name="AppNameBeta">Telegram Beta</string>
+     <string name="LanguageName">English</string>
+     <string name="English">English</string>
+diff --git a/TMessagesProj/src/main/res/values/strings_na.xml b/TMessagesProj/src/main/res/values/strings_na.xml
+index 617400870..874af7223 100644
+--- a/TMessagesProj/src/main/res/values/strings_na.xml
++++ b/TMessagesProj/src/main/res/values/strings_na.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Send Reactions</string>
+     <string name="ShowReactions">Show Reactions</string>
+     <string name="CustomTitle">Custom Title</string>
+-    <string name="CustomTitleHint">Leave blank to use Nagram X</string>
++    <string name="CustomTitleHint">Leave blank to use AliGram</string>
+     <string name="CreateMono">Create Monospace</string>
+     <string name="CreateMonoLanguage">Code Language</string>
+     <string name="CopyPhoto">Copy Photo</string>
+diff --git a/TMessagesProj/src/main/res/values/strings_nax.xml b/TMessagesProj/src/main/res/values/strings_nax.xml
+index b2f8d4eae..376c6886b 100644
+--- a/TMessagesProj/src/main/res/values/strings_nax.xml
++++ b/TMessagesProj/src/main/res/values/strings_nax.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="NagramX" translatable="false">Nagram X</string>
++    <string name="NagramX" translatable="false">AliGram</string>
+     <string name="XChannel">Nagram X Channel</string>
+     <string name="EnableSaveDeletedMessages">Save Deleted Messages</string>
+     <string name="DeletedMessage">deleted</string>
+@@ -341,8 +341,8 @@
+     <string name="BackAnimationSpring">Spring</string>
+     <string name="BackAnimationPredictive">Predictive</string>
+     <string name="AddToFilter">Add to Filter</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">You never received notifications with UnifiedPush since Nagram X was started.</string>
+-    <string name="UnifiedPushLastReceivedNotification">The last received notification with UnifiedPush was %1$d seconds ago.\n\nYou received %2$d notifications since Nagram X was started.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">You never received notifications with UnifiedPush since AliGram was started.</string>
++    <string name="UnifiedPushLastReceivedNotification">The last received notification with UnifiedPush was %1$d seconds ago.\n\nYou received %2$d notifications since AliGram was started.</string>
+     <string name="UnifiedPushCurrentEndpoint">The current UnifiedPush endpoint is: %1$s</string>
+     <string name="PlayOnce">Play once</string>
+     <string name="StorageSettings">Storage</string>
+diff --git a/TMessagesProj/src/main/res/xml/auth.xml b/TMessagesProj/src/main/res/xml/auth.xml
+index 769d6268c..c8c677bca 100644
+--- a/TMessagesProj/src/main/res/xml/auth.xml
++++ b/TMessagesProj/src/main/res/xml/auth.xml
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ 
+ <account-authenticator xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:accountType="nu.gpu.nagram"
++    android:accountType="app.aligram"
+     android:icon="@mipmap/ic_launcher_nagram_blue_round"
+     android:smallIcon="@mipmap/ic_launcher_nagram_blue_round"
+     android:label="@string/AppName"
+diff --git a/TMessagesProj/src/main/res/xml/auth_menu.xml b/TMessagesProj/src/main/res/xml/auth_menu.xml
+index d4862cb9a..520be3a3a 100644
+--- a/TMessagesProj/src/main/res/xml/auth_menu.xml
++++ b/TMessagesProj/src/main/res/xml/auth_menu.xml
+@@ -6,7 +6,7 @@
+         android:title="@string/AccountSettingsNax"
+         android:summary="">
+         <intent android:action="org.telegram.messenger.OPEN_ACCOUNT"
+-            android:targetPackage="nu.gpu.nagram"
++            android:targetPackage="app.aligram"
+             android:targetClass="org.telegram.ui.LaunchActivity"/>
+     </PreferenceScreen>
+ </PreferenceScreen>
+diff --git a/TMessagesProj/src/main/res/xml/contacts.xml b/TMessagesProj/src/main/res/xml/contacts.xml
+index b442d0414..c235c086f 100644
+--- a/TMessagesProj/src/main/res/xml/contacts.xml
++++ b/TMessagesProj/src/main/res/xml/contacts.xml
+@@ -1,17 +1,17 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <ContactsAccountType xmlns:android="http://schemas.android.com/apk/res/android">
+     <ContactsDataKind android:icon="@mipmap/ic_launcher_nagram_blue"
+-        android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.profile"
++        android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.profile"
+         android:summaryColumn="data2"
+         android:detailColumn="data3"
+         android:detailSocialSummary="true"/>
+     <ContactsDataKind android:icon="@mipmap/ic_launcher_nagram_blue"
+-        android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.call"
++        android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.call"
+         android:summaryColumn="data2"
+         android:detailColumn="data3"
+         android:detailSocialSummary="true"/>
+     <ContactsDataKind android:icon="@mipmap/ic_launcher_nagram_blue"
+-        android:mimeType="vnd.android.cursor.item/vnd.nu.gpu.nagram.android.call.video"
++        android:mimeType="vnd.android.cursor.item/vnd.app.aligram.android.call.video"
+         android:summaryColumn="data2"
+         android:detailColumn="data3"
+         android:detailSocialSummary="true"/>
+diff --git a/TMessagesProj/src/main/res/xml/sync_contacts.xml b/TMessagesProj/src/main/res/xml/sync_contacts.xml
+index 05ce05d2b..f0157f9c1 100644
+--- a/TMessagesProj/src/main/res/xml/sync_contacts.xml
++++ b/TMessagesProj/src/main/res/xml/sync_contacts.xml
+@@ -1,3 +1,3 @@
+ <sync-adapter xmlns:android="http://schemas.android.com/apk/res/android"
+     android:contentAuthority="com.android.contacts"
+-    android:accountType="nu.gpu.nagram"/>
+\ No newline at end of file
++    android:accountType="app.aligram"/>
+\ No newline at end of file
+diff --git a/gradle.properties b/gradle.properties
+index 5afa3d32d..91b4e826f 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -15,7 +15,7 @@
+ #Sat Mar 12 05:53:50 MSK 2016
+ APP_VERSION_CODE=6991
+ APP_VERSION_NAME=12.9.2
+-APP_PACKAGE=nu.gpu.nagram
++APP_PACKAGE=app.aligram
+ android.useAndroidX=true
+ android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false
+ org.gradle.daemon.idletimeout=1000
+-- 
+2.43.0
+

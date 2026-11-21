@@ -1,0 +1,113 @@
+From 64d10226448696e56e3402617cb918afbafcfbdf Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 16:45:34 +0300
+Subject: [PATCH 45/67] test(aligram): update eligibility tests for new
+ canIngest signature; archived preserves
+
+---
+ .../aligram/AliGramEligibilityTest.java       | 49 ++++++++++++-------
+ 1 file changed, 30 insertions(+), 19 deletions(-)
+
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
+index ee97b869f..f9823370d 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramEligibilityTest.java
+@@ -48,7 +48,7 @@ public class AliGramEligibilityTest {
+     private boolean ingestOk(int messageDate, boolean preExisting) {
+         return AliGramEligibility.canIngest(
+                 true, true, true, true, false,
+-                true, true, false, true, false,
++                true, true, true, false,
+                 true, messageDate, A, AliGramEligibility.ActivationState.STAMPED, preExisting);
+     }
+ 
+@@ -84,7 +84,7 @@ public class AliGramEligibilityTest {
+         // even when an activation time is recorded.
+         assertFalse(AliGramEligibility.isGateOpen(AliGramEligibility.ActivationState.PENDING, A));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, true, false, true, false,
++                true, true, true, true, false, true, true, true, false,
+                 true, A + 100, A, AliGramEligibility.ActivationState.PENDING, false));
+     }
+ 
+@@ -157,49 +157,60 @@ public class AliGramEligibilityTest {
+     public void ingestMatrix() {
+         // P off.
+         assertFalse(AliGramEligibility.canIngest(
+-                false, true, true, true, false, true, true, false, true, false,
++                false, true, true, true, false, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         // D and E both off: no axis could ever consume the blob.
+         assertFalse(AliGramEligibility.canIngest(
+-                true, false, false, true, false, true, true, false, true, false,
++                true, false, false, true, false, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         // D on, E off: ingest still runs (D consumes it).
+         assertTrue(AliGramEligibility.canIngest(
+-                true, true, false, true, false, true, true, false, true, false,
++                true, true, false, true, false, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         // D off, E on: ingest still runs (E consumes it).
+         assertTrue(AliGramEligibility.canIngest(
+-                true, false, true, true, false, true, true, false, true, false,
++                true, false, true, true, false, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+-        // M/T off blocks ingest…
++        // M/T off blocks ingest AT THE PURE-POLICY LEVEL — but for an
++        // opted-in dialog the caller (saveMediaEnabledForDialog) now
++        // resolves M/T to true by dominance, so this input can never
++        // arrive for one (see AliGramDominanceTest).
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, false, false, true, true, false, true, false,
++                true, true, true, false, false, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+-        // …as do secret/TTL, archived, non-post channel message, roaming,
+-        // an exhausted budget, a bad class and an over-cap size.
++        // …as do secret/TTL, a non-post message from a KNOWN broadcast
++        // channel, roaming, an exhausted budget, a bad class and an
++        // over-cap size.
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, true, true, true, false, true, false,
++                true, true, true, true, true, true, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, true, true, true, false,
++                true, true, true, true, false, true, true, false, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, true, false, false, false,
++                true, true, true, true, false, true, true, true, true,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, true, false, true, true,
+-                true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+-        assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, true, false, true, false,
++                true, true, true, true, false, true, true, true, false,
+                 false, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, false, true, false, true, false,
++                true, true, true, true, false, false, true, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+         assertFalse(AliGramEligibility.canIngest(
+-                true, true, true, true, false, true, false, false, true, false,
++                true, true, true, true, false, true, false, true, false,
+                 true, A + 1, A, AliGramEligibility.ActivationState.STAMPED, false));
+     }
+ 
++    @Test
++    public void archivedIsNoLongerAGate() {
++        // DOMINANCE (2026-11-21): the Archive gate is REMOVED — canIngest
++        // has no archive/folder/mute parameter at all, so there is no
++        // input that could block an archived opted-in dialog. This test
++        // pins the removal: the previously-blocking case now ingests.
++        // (Before the change this exact case asserted FALSE.)
++        assertTrue(ingestOk(A + 1, false));
++    }
++
+     @Test
+     public void exclusionGatesBindingNotIngest() {
+         // X / X_s never appear in canIngest (there is no such parameter):
+-- 
+2.43.0
+

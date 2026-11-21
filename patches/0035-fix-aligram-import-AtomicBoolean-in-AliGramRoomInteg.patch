@@ -1,0 +1,32 @@
+From 29de53a32c0fcf850cba43f89da52276c41550dc Mon Sep 17 00:00:00 2001
+From: "Flint (AliGram coordinator)" <flint@aligram.local>
+Date: Sat, 14 Nov 2026 20:02:39 +0000
+Subject: [PATCH 35/67] fix(aligram): import AtomicBoolean in
+ AliGramRoomIntegrationTest
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Run 43634833887 failed at compileDebugUnitTestJavaWithJavac: scenario
+12b uses AtomicBoolean but the test file only imported AtomicReference
+('cannot find symbol' at :1350, 2 errors). My miss — no local compile
+exists in this VM to catch it. No test ran on that run.
+---
+ .../com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java  | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+index d11c0ea63..72bcf7cc4 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramRoomIntegrationTest.java
+@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.Future;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicReference;
+ 
+ /**
+-- 
+2.43.0
+

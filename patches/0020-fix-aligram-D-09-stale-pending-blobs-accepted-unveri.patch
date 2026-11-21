@@ -1,0 +1,123 @@
+From 78ee70fc5fcc014c0e1238eb26e3bfe5c05d0ca1 Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 19:00:43 +0000
+Subject: [PATCH 20/67] =?UTF-8?q?fix(aligram):=20D-09=20=E2=80=94=20stale?=
+ =?UTF-8?q?=20pending=20blobs=20accepted=20unverified;=20orphan-blob=20swe?=
+ =?UTF-8?q?ep=20incomplete?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Verified: copyVerified accepted a pre-existing pending-<refId>.blob
+without verifying size or SHA (AliGramFileCopy rename loop), so a stale
+file from a crashed copy could be published under a blobId computed
+from the current stream's SHA; sweepRefcountZeroBlobs only swept
+refCount <= 0, so a crash between incrementRefCount and bindCopied
+left a refCount-1 blob with no ref pointing at it forever; the
+startup sweep only matched '.tmp-', never pending-*.blob. Fix:
+(1) on an existing pending file, delete it and retry the rename
+instead of accepting it (pending names are unique per refId and
+copyQueue is single-threaded, so an existing file is always stale);
+(3) sweepRefcountZeroBlobs also sweeps getUnreferencedBlobs()
+(recomputed, refCount ignored); (4) startup step 1 also sweeps
+orphan pending-*.blob files (owned = a live non-terminal ref of the
+same id in this account; a live job's stale pending file is kept —
+copyVerified deletes it when the copy re-drives). Fix (2), the
+transactional bind, is the re-read-before-bind in the D-10 commit.
+---
+ .../ayugram/aligram/AliGramFileCopy.java      | 14 +++++--
+ .../ayugram/aligram/AliGramPreservation.java  | 41 +++++++++++++++++++
+ 2 files changed, 51 insertions(+), 4 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
+index a38690fe4..490d498b8 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramFileCopy.java
+@@ -156,10 +156,16 @@ public final class AliGramFileCopy {
+         boolean renamed = false;
+         for (int attempt = 0; attempt < 3 && !renamed; attempt++) {
+             if (finalFile.exists()) {
+-                // Another job already published the same deterministic name.
+-                renamed = true;
+-                deleteQuietly(tempFile);
+-                break;
++                // Phase 3.1 (D-09): a stale pending-<refId>.blob from a
++                // previous crashed/interrupted copy for the same ref must
++                // NEVER be accepted unverified — it may hold different
++                // source bytes than the stream just copied, and the
++                // caller would publish it under a blobId computed from
++                // the CURRENT stream's SHA (blob content != stored SHA).
++                // The pending name is unique per refId and copyQueue is
++                // single-threaded, so an existing file here is always
++                // stale: delete it and retry the rename.
++                deleteQuietly(finalFile);
+             }
+             renamed = tempFile.renameTo(finalFile);
+         }
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index dad57651d..7a5d2b636 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1719,11 +1719,25 @@ public final class AliGramPreservation {
+             if (blobDao == null || refDao == null) {
+                 return;
+             }
++            HashSet<String> swept = new HashSet<>();
+             for (PreservedBlob blob : blobDao.getOrphanBlobs()) {
+                 if (refDao.countRefsForBlob(blob.blobId) > 0) {
+                     continue;
+                 }
+                 deleteBlobRowAndFiles(blob, blobDao);
++                swept.add(blob.blobId);
++            }
++            // Phase 3.1 (D-09): a crash between incrementRefCount and
++            // bindCopied leaves a blob with refCount > 0 and NO ref
++            // pointing at it, and getOrphanBlobs (refCount <= 0) never
++            // sees it — it leaked forever. Sweep the recomputed
++            // unreferenced set too (ignores the stored refCount, like
++            // sweepUnreferencedBlobs does after purge/clear).
++            for (PreservedBlob blob : blobDao.getUnreferencedBlobs()) {
++                if (!swept.add(blob.blobId)) {
++                    continue;
++                }
++                deleteBlobRowAndFiles(blob, blobDao);
+             }
+         } catch (Throwable e) {
+             FileLog.e(TAG + ": sweepRefcountZeroBlobs failed", e);
+@@ -2521,6 +2535,33 @@ public final class AliGramPreservation {
+                             AliGramFileCopy.deleteQuietly(f);
+                         }
+                     }
++                    // Phase 3.1 (D-09): also sweep orphan pending-*.blob
++                    // files — a crash between the two renames in
++                    // copyForRef leaves one behind, and the old sweep
++                    // only matched ".tmp-". A pending file is owned by
++                    // a live non-terminal ref of the same id; anything
++                    // else (no ref, terminal ref, unparseable name) is
++                    // orphaned. A live job's stale pending file is
++                    // KEPT here — copyVerified deletes + retries it when
++                    // the copy is re-driven (D-09 fix (1)).
++                    for (File f : files) {
++                        String name = f.getName();
++                        if (!name.startsWith("pending-") || !name.endsWith(".blob")) {
++                            continue;
++                        }
++                        boolean owned = false;
++                        try {
++                            long ownerId = Long.parseLong(name.substring("pending-".length(), name.length() - ".blob".length()));
++                            PreservedRef owner = dao.getRefById(ownerId);
++                            owned = owner != null && owner.accountId == account
++                                    && !AliGramEligibility.isTerminalState(owner.state);
++                        } catch (Throwable ignored) {
++                            owned = false;
++                        }
++                        if (!owned) {
++                            AliGramFileCopy.deleteQuietly(f);
++                        }
++                    }
+                 }
+             }
+         } catch (Throwable e) {
+-- 
+2.43.0
+

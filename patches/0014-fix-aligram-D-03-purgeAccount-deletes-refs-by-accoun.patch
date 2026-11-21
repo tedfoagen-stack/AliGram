@@ -1,0 +1,113 @@
+From 96329424e2924f14f8669bbee2a7084c4752eb0c Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:58:49 +0000
+Subject: [PATCH 14/67] =?UTF-8?q?fix(aligram):=20D-03=20=E2=80=94=20purgeA?=
+ =?UTF-8?q?ccount=20deletes=20refs=20by=20accountId,=20not=20userId?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+performLogout calls UserConfig.clearConfig() (clientUserId = 0) BEFORE
+the AliGram purge hook (MessagesController.java:16327 vs :16365), so
+purgeAccount's deleteRefsForAccount(ownUserId(account)) deleted zero
+rows: blob files + prefs were removed on logout but every PreservedRef
+and PreservedBlob row survived and degraded to UNAVAILABLE at startup.
+Verified: UserConfig.java:469 (clientUserId = 0 in clearConfig),
+AliGramPreservation.purgeAccount (userId captured at entry, 0 on the
+logout path). Fix: new PreservedRefDao.deleteRefsForAccountId(accountId)
+and call it in purgeAccount; same swap in clearPreservedStorage (same
+trap class). The async copyQueue purge is kept — it cannot be made
+synchronous from performLogout (UI thread, Room forbids main-thread
+queries); noted in code.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 26 ++++++++++++++++---
+ .../ayugram/aligram/PreservedRefDao.java      | 15 +++++++++++
+ 2 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 5fca466bd..f5b3236a5 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -2614,7 +2614,6 @@ public final class AliGramPreservation {
+      * (unlike purgeAccount) so enabled chats keep preserving new media. */
+     public static void clearPreservedStorage(int account) {
+         try {
+-            long userId = ownUserId(account);
+             if (ensureInitialized(account)) {
+                 copyQueue.postRunnable(() -> {
+                     try {
+@@ -2627,7 +2626,11 @@ public final class AliGramPreservation {
+                                     mirrorRemoveForRef(ref);
+                                 }
+                             }
+-                            dao.deleteRefsForAccount(userId);
++                            // Phase 3.1 (D-03): key the delete on the
++                            // account id, not the user id (same trap as
++                            // purgeAccount — the user id is not stable
++                            // across account lifecycle events).
++                            dao.deleteRefsForAccountId(account);
+                         }
+                         if (deferredDao != null) {
+                             // Account-wide ON PURPOSE here (settings clear-all):
+@@ -2776,7 +2779,6 @@ public final class AliGramPreservation {
+     /** Account removal (P-8): purge that account's refs and blob subtree. */
+     public static void purgeAccount(int account) {
+         try {
+-            long userId = ownUserId(account);
+             if (ensureInitialized(account)) {
+                 copyQueue.postRunnable(() -> {
+                     try {
+@@ -2789,7 +2791,23 @@ public final class AliGramPreservation {
+                                     mirrorRemoveForRef(ref);
+                                 }
+                             }
+-                            dao.deleteRefsForAccount(userId);
++                            // Phase 3.1 (D-03, RELEASE-BLOCKING): delete
++                            // by accountId, NOT by userId. performLogout
++                            // calls UserConfig.clearConfig() (clientUserId
++                            // = 0) BEFORE this hook, so the old
++                            // deleteRefsForAccount(ownUserId(account))
++                            // deleted zero rows and every PreservedRef /
++                            // PreservedBlob row survived logout.
++                            // Residual note (audit §1.2 D-03): the purge
++                            // still runs as a copyQueue runnable — if the
++                            // process dies between logout and the runnable,
++                            // the purge never runs. It cannot be made
++                            // synchronous here: performLogout runs on the
++                            // UI thread and Room forbids main-thread
++                            // queries. The rows are inert without the blob
++                            // subtree/prefs, and the next startup's
++                            // split-brain check marks them UNAVAILABLE.
++                            dao.deleteRefsForAccountId(account);
+                         }
+                         if (deferredDao != null) {
+                             // Account-wide ON PURPOSE here (account removal):
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+index 832288b6d..2f542beca 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/PreservedRefDao.java
+@@ -86,6 +86,21 @@ public interface PreservedRefDao {
+     @Query("DELETE FROM PreservedRef WHERE userId = :userId")
+     void deleteRefsForAccount(long userId);
+ 
++    /**
++     * Phase 3.1 (D-03): delete by the STABLE account id, never by
++     * {@code userId}. {@code MessagesController.performLogout} calls
++     * {@code UserConfig.clearConfig()} (which zeroes
++     * {@code clientUserId}) BEFORE the AliGram purge hook, so a purge
++     * keyed on {@code ownUserId(account)} deleted nothing — every
++     * {@code PreservedRef} row survived logout. The account id cannot
++     * be cleared out from under the purge, so this is robust to
++     * call-site ordering. Use this for account removal; keep
++     * {@link #deleteRefsForAccount(long)} only for callers that still
++     * hold a valid user id.
++     */
++    @Query("DELETE FROM PreservedRef WHERE accountId = :accountId")
++    void deleteRefsForAccountId(int accountId);
++
+     @Query("DELETE FROM PreservedRef WHERE userId = :userId AND dialogId = :dialogId")
+     void deleteRefsForDialog(long userId, long dialogId);
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,90 @@
+From 1046a96938bcdd3f2bb8f2927423bcfb32cc2cee Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 18:58:43 +0000
+Subject: [PATCH 13/67] =?UTF-8?q?fix(aligram):=20D-01=20=E2=80=94=20run=20?=
+ =?UTF-8?q?H-C=20completion/failure=20hooks=20on=20copyQueue,=20not=20the?=
+ =?UTF-8?q?=20UI=20thread?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DownloadController.didReceivedNotification runs on the UI thread
+(fileLoaded/fileLoadFailed are posted via runOnUIThread, NotificationCenter
+delivers synchronously on the posting thread), but onFileLoaded /
+onFileLoadFailed do synchronous Room DAO and the DB is deliberately built
+without allowMainThreadQueries() — so every call threw
+IllegalStateException inside the catch-all and never claimed a job, never
+incremented attempts, never scheduled the backoff retry. Verified:
+ImageLoader.java:2209-2248 (runOnUIThread posts),
+NotificationCenter.java:651 postNotificationNameInternal (synchronous,
+@UiThread), AliGramData.java (no allowMainThreadQueries).
+Fix: the public hooks only post to aligramCopyQueue and return; the
+existing bodies move to onFileLoadedInternal / onFileLoadFailedInternal
+unchanged. onFileLoadProgress is map-only and stays on the calling thread.
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 39 ++++++++++++++++++-
+ 1 file changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index aced55a06..5fca466bd 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -835,8 +835,28 @@ public final class AliGramPreservation {
+      * constructed before any ingest can run), and H-C is lookup-only: a
+      * completion with no waiting row is a no-op (opening an old message
+      * must never enrol it).
++     *
++     * <p>Phase 3.1 (D-01, RELEASE-BLOCKING): {@code DownloadController.
++     * didReceivedNotification} runs on the UI thread — the
++     * {@code fileLoaded}/{@code fileLoadFailed} notifications are posted
++     * via {@code AndroidUtilities.runOnUIThread} (ImageLoader's
++     * {@code fileDidLoaded}/{@code fileDidFailedLoad} delegate, and
++     * NotificationCenter delivers synchronously on the posting thread) —
++     * but this body does synchronous Room DAO, and the DB is deliberately
++     * built WITHOUT {@code allowMainThreadQueries()}, so every call threw
++     * {@code IllegalStateException} inside the catch-all and never
++     * claimed a job. The whole body therefore runs on
++     * {@code aligramCopyQueue}: this method only posts and returns.
+      */
+     public static void onFileLoaded(int account, String fileName, File file) {
++        try {
++            copyQueue.postRunnable(() -> onFileLoadedInternal(account, fileName, file));
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": onFileLoaded post failed", e);
++        }
++    }
++
++    private static void onFileLoadedInternal(int account, String fileName, File file) {
+         try {
+             if (fileName == null || !ensureInitialized(account)) {
+                 return;
+@@ -903,8 +923,25 @@ public final class AliGramPreservation {
+         }
+     }
+ 
+-    /** fileLoadFailed wake-up: attempts budget + backoff retry; NO_SPACE has no retry loop. */
++    /**
++     * fileLoadFailed wake-up: attempts budget + backoff retry; NO_SPACE has no retry loop.
++     *
++     * <p>Phase 3.1 (D-01, RELEASE-BLOCKING): same UI-thread problem as
++     * {@link #onFileLoaded} — this body does synchronous Room DAO but was
++     * called from {@code DownloadController.didReceivedNotification} on
++     * the UI thread, so the failure signal was lost the same way (attempts
++     * never incremented, backoff never scheduled). Posted to
++     * {@code aligramCopyQueue} at entry; see there.
++     */
+     public static void onFileLoadFailed(int account, String fileName, int canceled) {
++        try {
++            copyQueue.postRunnable(() -> onFileLoadFailedInternal(account, fileName, canceled));
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": onFileLoadFailed post failed", e);
++        }
++    }
++
++    private static void onFileLoadFailedInternal(int account, String fileName, int canceled) {
+         try {
+             if (fileName == null || !ensureInitialized(account)) {
+                 return;
+-- 
+2.43.0
+

@@ -1,0 +1,796 @@
+From d678c245892927d14e993c4635b8f856054f270e Mon Sep 17 00:00:00 2001
+From: AliGram <aligram@local>
+Date: Sat, 14 Nov 2026 15:07:24 +0000
+Subject: [PATCH 03/67] feat(aligram): wire preservation hooks
+ (H-I/H-C/H-E/H-D, deferred-delete guards)
+
+H-I: pre-existence probe at the putMessagesInternal loop top (before
+REPLACE) + maybeIngest right after the auto-download block.
+H-C: DownloadController fileLoaded / fileLoadFailed /
+fileLoadProgressChanged -> onFileLoaded / onFileLoadFailed /
+onFileLoadProgress (observer registered at construction, before any
+H-I loadFile; R-19 second wake-up is the watchdog/probe in the
+controller).
+H-E: Stage-A pin (pinForEdit) + LIVE-sync (liveSyncEdit, outside the
+from_id / E checks, pin first) before addFilesToDelete in the
+load_type == -2 branch; H-3 pin in emptyMessagesMedia; Phase-B bind
+via EditedMessageDao.insert now returning the fakeId.
+H-D: bindDeleted / onDeleteGateBlocked in AyuMessagesController;
+captured-delete notes in the remote snapshot runnable and the
+secret-chat path; mark-path sweep in markMessagesAsDeletedInternal
+(mode 0 only), clear-history sweep in the single-message internal,
+deleteUserChatHistory + deleteDialog (incl. messagesOnly == 2
+except-variant) sweeps.
+Deferred delete: Layer-1 guard in addFilesToDelete (all call sites),
+Layer-2 guard inside FileLoader.deleteFiles (all six call sites
+funnel through it), pinned-name filter in cancelLoadFiles /
+cancelLoadAllFiles (never cancel an in-flight freeze copy).
+Guard holes closed: shouldSaveMedia applied at both
+markMessagesAsDeletedInternal entries (secret-chat + clear-history).
+Manual clear: CacheControlActivity skips pinned files at both
+deletion sites. Eviction: AutoDeleteMediaTask skips pinned sources
+(H-1 sequenced fix). Logout: purgeAccount (P-8).
+Server round: processUpdateArray tail -> onServerRoundCompleted
+(R-7 stamping signal).
+---
+ .../ayugram/aligram/AliGramPreservation.java  | 114 +++++++++++-
+ .../messages/AyuMessagesController.java       |  32 +++-
+ .../messenger/AutoDeleteMediaTask.java        |  11 +-
+ .../messenger/DownloadController.java         |  26 +++
+ .../org/telegram/messenger/FileLoader.java    |  26 +++
+ .../messenger/MessagesController.java         |  27 +++
+ .../telegram/messenger/MessagesStorage.java   | 165 +++++++++++++++++-
+ .../org/telegram/ui/CacheControlActivity.java |  13 +-
+ 8 files changed, 400 insertions(+), 14 deletions(-)
+
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+index 3f6e08ca0..f630e9d17 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/aligram/AliGramPreservation.java
+@@ -1364,6 +1364,25 @@ public final class AliGramPreservation {
+         }
+     }
+ 
++    /** Overload for the Layer-2 guard in FileLoader.deleteFiles, which
++     * knows only the absolute path: resolve the pin refId from the mirror
++     * (0 when the mirror has no entry — the release still happens, keyed
++     * on the path). */
++    public static void recordDeferredDelete(int account, String absolutePath,
++                                            long sizeAtPin, long mtimeAtPin,
++                                            String requestedBy, boolean cancelDeferred) {
++        long refId = pinnedRefIdForPath(absolutePath);
++        recordDeferredDelete(account, refId, absolutePath, sizeAtPin, mtimeAtPin, requestedBy, cancelDeferred);
++    }
++
++    private static long pinnedRefIdForPath(String absolutePath) {
++        if (absolutePath == null) {
++            return 0;
++        }
++        Long refId = pinnedPathMirror.get(absolutePath);
++        return refId == null ? 0 : refId;
++    }
++
+     /**
+      * Layer-1 helper used inside MessagesStorage.addFilesToDelete: if the
+      * file is pinned, record the deferred delete and tell the caller to
+@@ -1704,10 +1723,29 @@ public final class AliGramPreservation {
+                 return; // no-op: LIVE ref already names the new media
+             }
+             if (live != null) {
+-                // Re-point: cancel the old in-flight download (if any) and
+-                // drop the old blob's anchor; the old blob is swept at
+-                // refcount 0 unless an EDIT ref anchors it.
+-                cancelLoadFileForJob(live);
++                // Re-point: cancel the old in-flight download — but NEVER
++                // when a freeze pin still waits on the same file. Stage A
++                // pinForEdit runs first in the same hook; cancelling its
++                // download would strand the freeze copy with no H-C wake-up
++                // (the pin has no watchdog; it would only fail at startup
++                // after the attempts budget).
++                boolean pinNeedsFile = false;
++                try {
++                    List<PreservedRef> waiting = dao.getWaitingJobsForFile(account, live.expectedFileName);
++                    if (waiting != null) {
++                        for (PreservedRef w : waiting) {
++                            if (w.refId != live.refId
++                                    && AliGramEligibility.STATE_PINNED.equals(w.state)) {
++                                pinNeedsFile = true;
++                                break;
++                            }
++                        }
++                    }
++                } catch (Throwable ignored) {
++                }
++                if (!pinNeedsFile) {
++                    cancelLoadFileForJob(live);
++                }
+                 if (live.blobId != null) {
+                     try {
+                         blobDao.decrementRefCount(live.blobId);
+@@ -2103,6 +2141,74 @@ public final class AliGramPreservation {
+         }
+     }
+ 
++    /** deleteDialog(messagesOnly == 2) keeps the last two messages: drop the
++     * refs of every other message in the dialog, leaving the kept ids anchored. */
++    public static void onDialogClearedExcept(int account, long dialogId, ArrayList<Integer> keptMessageIds) {
++        try {
++            if (!ensureInitialized(account)) {
++                return;
++            }
++            copyQueue.postRunnable(() -> {
++                try {
++                    PreservedRefDao dao = AliGramData.refDao();
++                    if (dao == null) {
++                        return;
++                    }
++                    long userId = ownUserId(account);
++                    HashSet<Integer> kept = new HashSet<>(keptMessageIds == null ? new ArrayList<>() : keptMessageIds);
++                    for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
++                        if (kept.contains((int) ref.messageId)) {
++                            continue;
++                        }
++                        if (AliGramEligibility.isActivePinState(ref.state)) {
++                            cancelLoadFileForJob(ref);
++                        }
++                        dropRefAndDecrement(ref);
++                    }
++                    sweepRefcountZeroBlobs(account);
++                } catch (Throwable e) {
++                    FileLog.e(TAG + ": onDialogClearedExcept failed", e);
++                }
++            });
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": onDialogClearedExcept failed", e);
++        }
++    }
++
++    /** Clear-history (single-message internal): drop the LIVE refs of the
++     * channel with messageId <= maxMessageId — their anchor rows are gone.
++     * DELETED / EDIT refs keep their Ayu anchors and are untouched. */
++    public static void onChannelHistoryCleared(int account, long dialogId, int maxMessageId) {
++        try {
++            if (!ensureInitialized(account)) {
++                return;
++            }
++            copyQueue.postRunnable(() -> {
++                try {
++                    PreservedRefDao dao = AliGramData.refDao();
++                    if (dao == null) {
++                        return;
++                    }
++                    long userId = ownUserId(account);
++                    for (PreservedRef ref : dao.getRefsForDialog(userId, dialogId)) {
++                        if (!"LIVE".equals(ref.role) || ref.messageId > maxMessageId) {
++                            continue;
++                        }
++                        if (AliGramEligibility.isActivePinState(ref.state)) {
++                            cancelLoadFileForJob(ref);
++                        }
++                        dropRefAndDecrement(ref);
++                    }
++                    sweepRefcountZeroBlobs(account);
++                } catch (Throwable e) {
++                    FileLog.e(TAG + ": onChannelHistoryCleared failed", e);
++                }
++            });
++        } catch (Throwable e) {
++            FileLog.e(TAG + ": onChannelHistoryCleared failed", e);
++        }
++    }
++
+     // ==================================================================
+     // Startup reconciliation (Phase 2.2 §5.6/§7.3, Phase 2.3 §2.2(e))
+     // ==================================================================
+diff --git a/TMessagesProj/src/main/java/com/radolyn/ayugram/messages/AyuMessagesController.java b/TMessagesProj/src/main/java/com/radolyn/ayugram/messages/AyuMessagesController.java
+index 5b0863411..4fbe9ef7c 100644
+--- a/TMessagesProj/src/main/java/com/radolyn/ayugram/messages/AyuMessagesController.java
++++ b/TMessagesProj/src/main/java/com/radolyn/ayugram/messages/AyuMessagesController.java
+@@ -14,6 +14,7 @@ import android.text.TextUtils;
+ 
+ import com.radolyn.ayugram.AyuConstants;
+ import com.radolyn.ayugram.AyuUtils;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.database.AyuData;
+ import com.radolyn.ayugram.database.dao.DeletedMessageDao;
+ import com.radolyn.ayugram.database.dao.EditedMessageDao;
+@@ -156,14 +157,21 @@ public class AyuMessagesController {
+             }
+         }
+ 
+-        withDaoRetry(
++        Long fakeId = withDaoRetry(
+                 "onMessageEditedInner#insert",
+-                () -> {
+-                    editedMessageDao.insert(revision);
+-                    return null;
+-                }
++                () -> editedMessageDao.insert(revision)
+         );
+ 
++        // --- AliGram hook (H-E Phase B, Phase 2.3 §1.6): bind the Stage-A
++        // pin / LIVE conversion to this revision's fakeId + revisionSeq.
++        // fakeId comes from the insert return — never from Room's in-place
++        // PK assignment.
++        try {
++            AliGramPreservation.bindEditRevision(prefs, newMessage, oldMessage, sameMedia, fakeId == null ? 0 : fakeId);
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++
+         AndroidUtilities.runOnUIThread(() -> NotificationCenter.getInstance(prefs.getAccountId()).postNotificationName(AyuConstants.MESSAGE_EDITED_NOTIFICATION, prefs.getDialogId(), prefs.getMessageId()));
+     }
+ 
+@@ -203,6 +211,13 @@ public class AyuMessagesController {
+ 
+     private void onMessageDeletedInner(AyuSavePreferences prefs) {
+         if (!AyuSavePreferences.saveDeletedMessageFor(prefs.getAccountId(), prefs.getDialogId(), prefs.getFromUserId())) {
++            // --- AliGram hook (H-D gate, Phase 2.3 §4.5): the delete gate
++            // blocked the capture — the LIVE ref loses its anchor.
++            try {
++                AliGramPreservation.onDeleteGateBlocked(prefs);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+             return;
+         }
+ 
+@@ -237,6 +252,13 @@ public class AyuMessagesController {
+             return;
+         }
+ 
++        // --- AliGram hook (H-D bind, Phase 2.3 §4.4): LIVE -> DELETED.
++        try {
++            AliGramPreservation.bindDeleted(prefs, fakeMsgId);
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++
+         if (msg != null && msg.reactions != null) {
+             processDeletedReactions(fakeMsgId, msg.reactions);
+         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/AutoDeleteMediaTask.java b/TMessagesProj/src/main/java/org/telegram/messenger/AutoDeleteMediaTask.java
+index f6349d110..1a5f82be6 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/AutoDeleteMediaTask.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/AutoDeleteMediaTask.java
+@@ -5,6 +5,7 @@ import static org.telegram.messenger.CacheByChatsController.KEEP_MEDIA_TYPE_STOR
+ import android.util.SparseArray;
+ 
+ import com.google.android.exoplayer2.util.Log;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ 
+ import java.io.File;
+ import java.util.ArrayList;
+@@ -117,7 +118,10 @@ public class AutoDeleteMediaTask {
+                                 timeLocal = time - seconds;
+                             }
+                             long lastUsageTime = Utilities.getLastUsageFileTime(file.file.getAbsolutePath());
+-                            boolean needDelete = lastUsageTime > 316000000 && lastUsageTime < timeLocal && !usingFilePaths.contains(file.file.getPath());
++                            boolean needDelete = lastUsageTime > 316000000 && lastUsageTime < timeLocal && !usingFilePaths.contains(file.file.getPath())
++                                    // --- AliGram hook (H-1 sequenced fix):
++                                    // never evict a pinned preservation source
++                                    && !AliGramPreservation.isPathPinned(file.file.getAbsolutePath());
+                             if (needDelete) {
+                                 try {
+                                     if (BuildVars.LOGS_ENABLED) {
+@@ -177,6 +181,11 @@ public class AutoDeleteMediaTask {
+                             skippedFiles++;
+                             continue;
+                         }
++                        // --- AliGram hook (H-1 sequenced fix): never evict a
++                        // pinned preservation source by size either.
++                        if (AliGramPreservation.isPathPinned(allFiles.get(i).file.getAbsolutePath())) {
++                            continue;
++                        }
+                         long size = allFiles.get(i).file.length();
+                         totalSize -= size;
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java b/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
+index 3cec92897..ad6e5cacc 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java
+@@ -37,6 +37,8 @@ import java.util.HashMap;
+ import java.util.Locale;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
++import com.radolyn.ayugram.aligram.AliGramPreservation;
++
+ import tw.nekomimi.nekogram.filters.AyuFilter;
+ import tw.nekomimi.nekogram.utils.AndroidUtil;
+ 
+@@ -1349,6 +1351,13 @@ public class DownloadController extends BaseController implements NotificationCe
+             listenerInProgress = false;
+             processLaterArrays();
+             checkDownloadFinished(fileName, canceled);
++            // --- AliGram hook (H-C failure, Phase 2.2 §1.7): the
++            // preservation job retries on its attempts budget.
++            try {
++                AliGramPreservation.onFileLoadFailed(account, fileName, canceled == null ? 0 : canceled);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+         } else if (id == NotificationCenter.fileLoaded || id == NotificationCenter.httpFileDidLoad) {
+             listenerInProgress = true;
+             String fileName = (String) args[0];
+@@ -1374,6 +1383,15 @@ public class DownloadController extends BaseController implements NotificationCe
+             listenerInProgress = false;
+             processLaterArrays();
+             checkDownloadFinished(fileName, 0);
++            // --- AliGram hook (H-C completion, Phase 2.2 §1.7): fan-out
++            // claim for preservation jobs waiting on this file. Registered
++            // at construction — before any H-I loadFile can run (R-19).
++            try {
++                File loadedFile = args != null && args.length > 1 && args[1] instanceof File ? (File) args[1] : null;
++                AliGramPreservation.onFileLoaded(account, fileName, loadedFile);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+         } else if (id == NotificationCenter.fileLoadProgressChanged) {
+             listenerInProgress = true;
+             String fileName = (String) args[0];
+@@ -1390,6 +1408,14 @@ public class DownloadController extends BaseController implements NotificationCe
+             }
+             listenerInProgress = false;
+             processLaterArrays();
++            // --- AliGram hook (H-C progress): refreshes the watchdog's
++            // last-progress clock so an actively downloading job is never
++            // mistaken for stuck (R-19).
++            try {
++                AliGramPreservation.onFileLoadProgress(account, fileName);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+         } else if (id == NotificationCenter.fileUploadProgressChanged) {
+             listenerInProgress = true;
+             String fileName = (String) args[0];
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
+index 277301ddc..3d79a5a03 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java
+@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ 
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.utils.AyuFileLocation;
+ 
+ public class FileLoader extends BaseController {
+@@ -586,6 +587,12 @@ public class FileLoader extends BaseController {
+ 
+     public void cancelLoadFiles(ArrayList<String> fileNames) {
+         for (int a = 0, N = fileNames.size(); a < N; a++) {
++            // --- AliGram hook: never cancel an in-flight freeze copy
++            // (cancelDeferred — the deferred row recorded at Layer 1
++            // already carries the cancel intent for release time).
++            if (AliGramPreservation.isFileNamePinned(fileNames.get(a))) {
++                continue;
++            }
+             cancelLoadFile(null, null, null, null, null, fileNames.get(a), true);
+         }
+     }
+@@ -684,6 +691,11 @@ public class FileLoader extends BaseController {
+ 
+     public void cancelLoadAllFiles() {
+         for (String fileName : loadOperationPathsUI.keySet()) {
++            // --- AliGram hook: never cancel an in-flight preservation
++            // download (the freeze copy depends on its H-C wake-up).
++            if (AliGramPreservation.isFileNamePinned(fileName)) {
++                continue;
++            }
+             LoadOperationUIObject uiObject = loadOperationPathsUI.get(fileName);
+             Runnable runnable = uiObject != null ? uiObject.loadInternalRunnable : null;
+             boolean removed = uiObject != null;
+@@ -1747,6 +1759,20 @@ public class FileLoader extends BaseController {
+         fileLoaderQueue.postRunnable(() -> {
+             for (int a = 0; a < files.size(); a++) {
+                 File file = files.get(a);
++                // --- AliGram hook (Layer-2 deferred-delete guard, Phase 2.3
++                // §2.2): a pinned file — and its .enc / .enc.key / q_ siblings
++                // — is never deleted here. A DeferredDelete row is recorded
++                // instead and released only after the copy reaches a
++                // terminal state. This is the funnel for all six
++                // .deleteFiles( sites in MessagesStorage.
++                if (AliGramPreservation.isPathPinned(file.getAbsolutePath())) {
++                    try {
++                        AliGramPreservation.recordDeferredDelete(currentAccount, file.getAbsolutePath(), 0, 0, "DELETE", false);
++                    } catch (Throwable e) {
++                        FileLog.e(e);
++                    }
++                    continue;
++                }
+                 File encrypted = new File(file.getAbsolutePath() + ".enc");
+                 if (encrypted.exists()) {
+                     try {
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+index f6d02e747..79b0b29f6 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+@@ -139,6 +139,8 @@ import java.util.stream.Collectors;
+ 
+ import me.vkryl.core.BitwiseUtils;
+ 
++import com.radolyn.ayugram.aligram.AliGramPreservation;
++
+ import tw.nekomimi.nekogram.NekoConfig;
+ import tw.nekomimi.nekogram.filters.AyuFilter;
+ import tw.nekomimi.nekogram.filters.ReactionFilter;
+@@ -16357,6 +16359,13 @@ public class MessagesController extends BaseController implements NotificationCe
+         getMessagesStorage().cleanup(false);
+         cleanup();
+         getContactsController().deleteUnknownAppAccounts();
++        // --- AliGram hook (P-8): remove this account's preserved blobs,
++        // refs, deferred rows and per-chat activation prefs.
++        try {
++            AliGramPreservation.purgeAccount(currentAccount);
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
+     }
+ 
+     public void registerForPush(@PushListenerController.PushType int pushType, String regid) {
+@@ -19967,6 +19976,14 @@ public class MessagesController extends BaseController implements NotificationCe
+                                 var topicId = MessageObject.getTopicId(currentAccount, msg, isForum(dialogId));
+                                 var prefs = new AyuSavePreferences(msg, currentAccount, dialogId, topicId, msg.id, (int)(currentTime / 1000));
+                                 ayuMessagesController.onMessageDeleted(prefs);
++                                // --- AliGram hook: the capture above ran
++                                // first — the mark sweep below must not
++                                // terminate the LIVE ref before it binds.
++                                try {
++                                    AliGramPreservation.noteCapturedDelete(currentAccount, dialogId, msg.id);
++                                } catch (Throwable e) {
++                                    FileLog.e(e);
++                                }
+                             }
+                         }
+                         notificationsToSend.put(dialogId, messageIds);
+@@ -21482,6 +21499,16 @@ public class MessagesController extends BaseController implements NotificationCe
+             }
+         }
+ 
++        // --- AliGram hook (R-7): a server round completed in this process —
++        // a successful getDifference / updates batch. Stamping a PENDING
++        // activation requires this event in the current process, never a
++        // restored timeDifference alone (Phase 2.3 §1.5 + phase3 §3.5).
++        try {
++            AliGramPreservation.onServerRoundCompleted(currentAccount);
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++
+         return true;
+     }
+ 
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+index d7019be09..9e7184de5 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessagesStorage.java
+@@ -84,6 +84,7 @@ import tw.nekomimi.nekogram.helpers.AppRestartHelper;
+ import tw.nekomimi.nekogram.helpers.MessageHelper;
+ import xyz.nextalone.nagram.NaConfig;
+ import com.radolyn.ayugram.AyuConstants;
++import com.radolyn.ayugram.aligram.AliGramPreservation;
+ import com.radolyn.ayugram.messages.AyuMessagesController;
+ import com.radolyn.ayugram.messages.AyuSavePreferences;
+ import com.radolyn.ayugram.proprietary.AyuMessageUtils;
+@@ -4343,6 +4344,13 @@ public class MessagesStorage extends BaseController {
+                     getMessagesController().markDialogMessageAsDeleted(dialogId, mids);
+                 });
+                 markMessagesAsDeletedInternal(dialogId, mids, false, 0, 0);
++                // --- AliGram hook: the rows for these messages are gone —
++                // terminate their LIVE refs (files were L1/L2-guarded above).
++                try {
++                    AliGramPreservation.onMessagesMarkedDeleted(currentAccount, dialogId, mids);
++                } catch (Throwable e) {
++                    FileLog.e(e);
++                }
+                 updateDialogsWithDeletedMessagesInternal(dialogId, DialogObject.isChatDialog(dialogId) ? -dialogId : 0, mids, null);
+                 getFileLoader().deleteFiles(filesToDelete, 0);
+                 if (!mids.isEmpty()) {
+@@ -4358,6 +4366,24 @@ public class MessagesStorage extends BaseController {
+         });
+     }
+ 
++    // --- AliGram hook (Layer-1 deferred-delete guard, Phase 2.3 §2.2):
++    // a pinned file is never collected for deletion; a DeferredDelete row
++    // is recorded instead, and released only after the copy reaches a
++    // terminal state. Covers all addFilesToDelete call sites at once.
++    private void aligramAddFileToDelete(ArrayList<File> filesToDelete, File file) {
++        if (file == null || file.toString().length() == 0) {
++            return;
++        }
++        try {
++            if (AliGramPreservation.skipPinnedFile(currentAccount, file, "DELETE")) {
++                return;
++            }
++        } catch (Throwable e) {
++            FileLog.e(e);
++        }
++        filesToDelete.add(file);
++    }
++
+     private boolean addFilesToDelete(TLRPC.Message message, ArrayList<File> filesToDelete, ArrayList<Pair<Long, Integer>> ids, ArrayList<String> namesToDelete, boolean forceCache) {
+         if (message == null) {
+             return false;
+@@ -4412,7 +4438,7 @@ public class MessagesStorage extends BaseController {
+                 }
+                 File file = getFileLoader().getPathToAttach(photoSize, forceCache);
+                 if (file.toString().length() > 0) {
+-                    filesToDelete.add(file);
++                    aligramAddFileToDelete(filesToDelete, file);
+                 }
+             }
+             return true;
+@@ -4423,13 +4449,13 @@ public class MessagesStorage extends BaseController {
+             }
+             File file = getFileLoader().getPathToAttach(document, forceCache);
+             if (file.toString().length() > 0) {
+-                filesToDelete.add(file);
++                aligramAddFileToDelete(filesToDelete, file);
+             }
+             for (int a = 0, N = document.thumbs.size(); a < N; a++) {
+                 TLRPC.PhotoSize photoSize = document.thumbs.get(a);
+                 file = getFileLoader().getPathToAttach(photoSize);
+                 if (file.toString().length() > 0) {
+-                    filesToDelete.add(file);
++                    aligramAddFileToDelete(filesToDelete, file);
+                 }
+             }
+             return true;
+@@ -4541,6 +4567,18 @@ public class MessagesStorage extends BaseController {
+                         state6.dispose();
+                         state6 = null;
+                         updateWidgets(did);
++                        // --- AliGram hook: all messages except the two
++                        // retained ones were deleted — drop their
++                        // preservation refs, keeping the retained messages
++                        // anchored.
++                        try {
++                            ArrayList<Integer> aligramKept = new ArrayList<>();
++                            aligramKept.add((int) last_mid_i);
++                            aligramKept.add((int) last_mid);
++                            AliGramPreservation.onDialogClearedExcept(currentAccount, did, aligramKept);
++                        } catch (Throwable e) {
++                            FileLog.e(e);
++                        }
+                     }
+                     cursor.dispose();
+                     cursor = null;
+@@ -4560,6 +4598,14 @@ public class MessagesStorage extends BaseController {
+                 AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.needReloadRecentDialogsSearch));
+                 resetAllUnreadCounters(false);
+                 updateWidgets(did);
++                // --- AliGram hook (P-DLG): the dialog's messages are gone
++                // (messagesOnly 0 / 1 / 3 all delete every messages_v2 row
++                // for the dialog) — drop its preservation refs.
++                try {
++                    AliGramPreservation.onDialogDeleted(currentAccount, did);
++                } catch (Throwable e) {
++                    FileLog.e(e);
++                }
+             } catch (Exception e) {
+                 checkSQLException(e);
+             } finally {
+@@ -4791,6 +4837,14 @@ public class MessagesStorage extends BaseController {
+                         message.readAttachPath(data, getUserConfig().clientUserId);
+                         data.reuse();
+                         if (message.media != null) {
++                            // --- AliGram hook (H-3): pin the old media BEFORE
++                            // addFilesToDelete blanks it — otherwise the
++                            // freeze has nothing to copy.
++                            try {
++                                AliGramPreservation.pinForMediaRemoval(currentAccount, dialogId, message);
++                            } catch (Throwable e) {
++                                FileLog.e(e);
++                            }
+                             if (!addFilesToDelete(message, filesToDelete, idsToDelete, namesToDelete, true)) {
+                                 continue;
+                             } else {
+@@ -12044,6 +12098,20 @@ public class MessagesStorage extends BaseController {
+                     TLRPC.Message message = messages.get(a);
+                     fixUnsupportedMedia(message);
+ 
++                    // --- AliGram hook (H-I pre-existence probe, Phase 2.3 §1.2):
++                    // the REPLACE below writes the row, so the probe must run
++                    // first — it decides whether this message is "new" for
++                    // the activation boundary.
++                    Boolean aligramPreExisting = null;
++                    try {
++                        MessageObject.getDialogId(message);
++                        if (AliGramPreservation.shouldProbePreExisting(currentAccount, message.dialog_id, message)) {
++                            aligramPreExisting = aligramMessagePreExists(message.dialog_id, message.id);
++                        }
++                    } catch (Throwable e) {
++                        FileLog.e(e);
++                    }
++
+                     int messageId = message.id;
+                     MessageObject.getDialogId(message);
+                     long topicId = MessageObject.getTopicId(currentAccount, message, getForumTypeFlags(message.dialog_id));
+@@ -12749,6 +12817,17 @@ public class MessagesStorage extends BaseController {
+                             }
+                         }
+                     }
++                    // --- AliGram hook (H-I ingest, Phase 2.3 §1.3): per-chat
++                    // preservation. Runs after the REPLACE above (so the row
++                    // now exists) but the pre-existence probe was taken at
++                    // the loop top, before the row was written.
++                    try {
++                        boolean aligramArchived = getDialogFolderIdInternal(message.dialog_id) == 1;
++                        boolean aligramChannelPostOk = message.peer_id == null || message.peer_id.channel_id == 0 || message.post;
++                        AliGramPreservation.maybeIngest(currentAccount, message, aligramPreExisting, aligramArchived, aligramChannelPostOk);
++                    } catch (Throwable e) {
++                        FileLog.e(e);
++                    }
+                 }
+                 state_messages.dispose();
+                 state_messages_topic.dispose();
+@@ -14100,6 +14179,14 @@ public class MessagesStorage extends BaseController {
+                                     var prefs = new AyuSavePreferences(msg, currentAccount);
+                                     prefs.setDialogId(dialogId);
+                                     ayuMessagesController.onMessageDeleted(prefs, true);
++                                    // --- AliGram hook: the capture above ran
++                                    // first — the mark sweep below must not
++                                    // terminate the LIVE ref before it binds.
++                                    try {
++                                        AliGramPreservation.noteCapturedDelete(currentAccount, dialogId, msgId);
++                                    } catch (Throwable e) {
++                                        FileLog.e(e);
++                                    }
+                                 }
+                             }
+                         }
+@@ -14167,6 +14254,14 @@ public class MessagesStorage extends BaseController {
+         SQLiteCursor cursor = null;
+         SQLitePreparedStatement state = null;
+         try {
++            // --- AliGram hook (guard holes 2/3): direct internal callers
++            // (secret-chat randoms path, saved-messages path) bypass the
++            // public wrapper's shouldSaveMedia guard — apply it here so
++            // files AyuGram is saving are never collected for deletion.
++            // Idempotent with the wrapper's own guard.
++            if (deleteFiles && AyuMessageUtils.shouldSaveMedia(currentAccount, dialogId)) {
++                deleteFiles = false;
++            }
+             if (getUserConfig().getClientUserId() == dialogId) {
+                 database.executeFast(String.format(Locale.US, "DELETE FROM tag_message_id WHERE mid IN(%s)", TextUtils.join(",", messages))).stepThis().dispose();
+             }
+@@ -14703,6 +14798,19 @@ public class MessagesStorage extends BaseController {
+                 }
+                 getMediaDataController().clearBotKeyboard(null, messages);
+ 
++                // --- AliGram hook (H-D sweep, normal branch only — this is
++                // mode 0; scheduled / quick-reply branches touch no
++                // messages_v2 rows (H-9) and never reach here): terminate
++                // the LIVE refs whose anchor rows were just deleted.
++                try {
++                    for (int a = 0, N = messagesByDialogs.size(); a < N; a++) {
++                        long did = messagesByDialogs.keyAt(a);
++                        AliGramPreservation.onMessagesMarkedDeleted(currentAccount, did, messagesByDialogs.valueAt(a));
++                    }
++                } catch (Throwable e) {
++                    FileLog.e(e);
++                }
++
+                 if (dialogsToUpdate.size() != 0) {
+                     resetAllUnreadCounters(false);
+                 }
+@@ -14972,6 +15080,13 @@ public class MessagesStorage extends BaseController {
+         SQLiteCursor cursor = null;
+         SQLitePreparedStatement state = null;
+         try {
++            // --- AliGram hook (hole 2): the single-message (clear-history)
++            // public overload applies no shouldSaveMedia guard — apply it
++            // here. Note: channelId holds the SIGNED dialog id (the SQL
++            // below uses uid = -channelId), so it is passed as-is.
++            if (deleteFiles && AyuMessageUtils.shouldSaveMedia(currentAccount, channelId)) {
++                deleteFiles = false;
++            }
+             ArrayList<Long> dialogsIds = new ArrayList<>();
+             LongSparseArray<Integer[]> dialogsToUpdate = new LongSparseArray<>();
+ 
+@@ -15078,6 +15193,13 @@ public class MessagesStorage extends BaseController {
+             database.executeFast(String.format(Locale.US, "DELETE FROM media_v4 WHERE uid = %d AND mid <= %d", -channelId, mid)).stepThis().dispose();
+             database.executeFast(String.format(Locale.US, "UPDATE media_counts_v2 SET old = 1 WHERE uid = %d", -channelId)).stepThis().dispose();
+             database.executeFast(String.format(Locale.US, "UPDATE media_counts_topics SET old = 1 WHERE uid = %d", -channelId)).stepThis().dispose();
++            // --- AliGram hook (clear-history sweep): every message with
++            // mid <= mid in this channel just lost its anchor row.
++            try {
++                AliGramPreservation.onChannelHistoryCleared(currentAccount, channelId, mid);
++            } catch (Throwable e) {
++                FileLog.e(e);
++            }
+             updateWidgets(dialogsIds);
+             return dialogsIds;
+         } catch (Exception e) {
+@@ -15102,6 +15224,25 @@ public class MessagesStorage extends BaseController {
+         return null;
+     }
+ 
++    // --- AliGram hook (Phase 2.3 §1.2): does a messages_v2 row for this
++    // message already exist (i.e. is this an update / re-delivery of a
++    // stored message)? Called BEFORE the REPLACE in putMessagesInternal, so
++    // the answer reflects the state before this ingest.
++    private boolean aligramMessagePreExists(long dialogId, long messageId) {
++        SQLiteCursor cursor = null;
++        try {
++            cursor = database.queryFinalized(String.format(Locale.US, "SELECT 1 FROM messages_v2 WHERE uid = %d AND mid = %d LIMIT 1", dialogId, messageId));
++            return cursor != null && cursor.next();
++        } catch (Exception e) {
++            checkSQLException(e);
++            return false;
++        } finally {
++            if (cursor != null) {
++                cursor.dispose();
++            }
++        }
++    }
++
+     private void fixUnsupportedMedia(TLRPC.Message message) {
+         if (message == null) {
+             return;
+@@ -15928,6 +16069,24 @@ public class MessagesStorage extends BaseController {
+                                             }
+                                         }
+                                         // --- AyuGram hook
++                                        // --- AliGram hook (H-E Stage A pin + LIVE-sync,
++                                        // Phase 2.3 §2.2/§4.1): the pin runs FIRST — it
++                                        // captures the old media while LIVE still names
++                                        // it; LIVE-sync then re-points LIVE at the new
++                                        // media. Both run BEFORE addFilesToDelete below.
++                                        // LIVE-sync is outside the from_id / E checks
++                                        // (it runs even for channel posts); the pin is
++                                        // E-gated inside pinForEdit itself.
++                                        try {
++                                            AliGramPreservation.pinForEdit(currentAccount, dialogId, oldMessage, message, sameMedia);
++                                        } catch (Throwable e) {
++                                            FileLog.e(e);
++                                        }
++                                        try {
++                                            AliGramPreservation.liveSyncEdit(currentAccount, dialogId, oldMessage, message, sameMedia, false);
++                                        } catch (Throwable e) {
++                                            FileLog.e(e);
++                                        }
+                                         if (!sameMedia) {
+                                             addFilesToDelete(oldMessage, filesToDelete, idsToDelete, namesToDelete, false);
+                                         }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/CacheControlActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/CacheControlActivity.java
+index 864c88e2a..5945a3723 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/CacheControlActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/CacheControlActivity.java
+@@ -135,6 +135,8 @@ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.Objects;
+ 
++import com.radolyn.ayugram.aligram.AliGramPreservation;
++
+ import tw.nekomimi.nekogram.helpers.LocalNameHelper;
+ import tw.nekomimi.nekogram.helpers.remote.EmojiHelper;
+ import xyz.nextalone.nagram.helper.BookmarksHelper;
+@@ -969,7 +971,11 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
+                     }
+                     cleanDirJava(fileName + "/" + name, docType, p, onProgress);
+                 } else {
+-                    entry.delete();
++                    // --- AliGram hook (P-CLR): skip pinned preservation
++                    // sources on manual cache clear.
++                    if (!AliGramPreservation.isPathPinned(entry.getAbsolutePath())) {
++                        entry.delete();
++                    }
+ 
+                     p[0]++;
+                     if (onProgress != null) {
+@@ -1629,6 +1635,11 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
+         getFileLoader().cancelLoadAllFiles();
+         getFileLoader().getFileLoaderQueue().postRunnable(() -> {
+             for (int i = 0; i < fileInfos.size(); i++) {
++                // --- AliGram hook (P-CLR): skip pinned preservation sources
++                // on manual cache clear.
++                if (AliGramPreservation.isPathPinned(fileInfos.get(i).file.getAbsolutePath())) {
++                    continue;
++                }
+                 fileInfos.get(i).file.delete();
+             }
+ 
+-- 
+2.43.0
+

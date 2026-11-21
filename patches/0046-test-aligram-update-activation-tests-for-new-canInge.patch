@@ -1,0 +1,26 @@
+From be908503d49573a7ff9695e4726f6dd100008dd4 Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 16:45:37 +0300
+Subject: [PATCH 46/67] test(aligram): update activation tests for new
+ canIngest signature
+
+---
+ .../java/com/radolyn/ayugram/aligram/AliGramActivationTest.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
+index 58ba9365b..39b610d3a 100644
+--- a/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
++++ b/TMessagesProj/src/test/java/com/radolyn/ayugram/aligram/AliGramActivationTest.java
+@@ -76,7 +76,7 @@ public class AliGramActivationTest {
+                              AliGramEligibility.ActivationState state, int activationTime) {
+         return AliGramEligibility.canIngest(
+                 true, true, true, true, false,
+-                true, true, false, true, false,
++                true, true, true, false,
+                 true, messageDate, activationTime, state, false);
+     }
+ 
+-- 
+2.43.0
+

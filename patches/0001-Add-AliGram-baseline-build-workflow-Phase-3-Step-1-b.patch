@@ -1,0 +1,90 @@
+From 4c51bb426efcca70c150980da735d4ad166284cf Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 14 Nov 2026 17:43:31 +0300
+Subject: [PATCH 01/67] Add AliGram baseline build workflow (Phase 3 Step 1
+ build gate)
+
+---
+ .github/workflows/aligram-build.yml | 70 +++++++++++++++++++++++++++++
+ 1 file changed, 70 insertions(+)
+ create mode 100644 .github/workflows/aligram-build.yml
+
+diff --git a/.github/workflows/aligram-build.yml b/.github/workflows/aligram-build.yml
+new file mode 100644
+index 000000000..af0b611ad
+--- /dev/null
++++ b/.github/workflows/aligram-build.yml
+@@ -0,0 +1,70 @@
++name: AliGram Build
++
++# AliGram Phase 3, Step 1 (build gate): build the UNMODIFIED tag-1260
++# baseline on the feature branch and prove it is green before any
++# feature change. Derived from upstream .github/workflows/pr.yml
++# (same checkout/JDK/Gradle/SDK/sed/assembleDebug steps); only the
++# triggers and the artifact name differ. No application code is
++# touched by this workflow.
++
++on:
++  workflow_dispatch:
++  push:
++    branches:
++      - feature/aligram-media-preservation
++    paths-ignore:
++      - '**.md'
++      - '**.xml'
++
++jobs:
++  build:
++    name: Gradle Build (baseline gate)
++    runs-on: ubuntu-latest
++    timeout-minutes: 180
++    env:
++      NATIVE_TARGET: "arm64-v8a"
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v7
++        with:
++          fetch-depth: 1
++          submodules: recursive
++      - name: Set up JDK
++        uses: actions/setup-java@v5
++        with:
++          distribution: 'temurin'
++          java-version: '21'
++      - name: Set up Gradle
++        uses: gradle/actions/setup-gradle@v6
++      - name: Set up Android SDK Tools
++        uses: android-actions/setup-android@v4
++        with:
++          packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
++      - name: Configure Android SDK Path
++        run: |
++          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
++      - name: Modify Gradle JVM Args
++        run: |
++          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
++          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
++          echo "Detected memory size: ${MEMORY_GB}GB"
++          if [ $MEMORY_GB -ge 12 ]; then
++            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
++            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
++          fi
++          cat gradle.properties
++      - name: Debug Build
++        run: |
++          export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
++          export DEBUG_BUILD=true
++          sed -i 's/signingConfig = signingConfigs.release//g' TMessagesProj/build.gradle
++          ./gradlew TMessagesProj:assembleDebug
++
++          APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
++          APK=$(dirname $APK)
++          echo "APK=$APK" >> $GITHUB_ENV
++      - name: Upload Artifacts
++        uses: actions/upload-artifact@v7
++        with:
++          name: AliGram-Baseline-Debug
++          path: ${{ env.APK }}
+-- 
+2.43.0
+

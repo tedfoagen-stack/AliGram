@@ -1,0 +1,33 @@
+From dca602285ea3a6e29c3467a404da1a621b56adca Mon Sep 17 00:00:00 2001
+From: tedfoagen-stack <tedfoagen@gmail.com>
+Date: Sat, 21 Nov 2026 18:10:49 +0300
+Subject: [PATCH 57/67] =?UTF-8?q?feat(aligram):=20hidden=20folders=20?=
+ =?UTF-8?q?=E2=80=94=20filter=20hidden=20dialogs=20in=20server/phone=20sea?=
+ =?UTF-8?q?rch=20merge?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../java/org/telegram/ui/Adapters/SearchAdapterHelper.java   | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Adapters/SearchAdapterHelper.java b/TMessagesProj/src/main/java/org/telegram/ui/Adapters/SearchAdapterHelper.java
+index 5cb72231e..818bd7e8f 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Adapters/SearchAdapterHelper.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Adapters/SearchAdapterHelper.java
+@@ -289,7 +289,10 @@ public class SearchAdapterHelper {
+                 if (user == null) {
+                     continue;
+                 }
+-                if (user.phone != null && user.phone.startsWith(phone)) {
++                // --- AliGram hidden folders: phone search is another
++                // server-merge surface; the per-adapter filter() override
++                // (DialogsSearchAdapter) drops hidden dialogs here.
++                if (user.phone != null && user.phone.startsWith(phone) && filter(user)) {
+                     if (!hasFullMatch) {
+                         hasFullMatch = user.phone.length() == phone.length();
+                     }
+-- 
+2.43.0
+
