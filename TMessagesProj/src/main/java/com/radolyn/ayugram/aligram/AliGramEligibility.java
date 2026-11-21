@@ -395,54 +395,85 @@ public final class AliGramEligibility {
 
     /**
      * H-I ingest: {@code P ∧ (D ∨ E) ∧ M/T ∧ ¬secret/TTL/once ∧ media-class ∧
-     * size-cap ∧ ¬archived ∧ (channel ⇒ post) ∧ ¬roaming ∧ budget ∧
+     * size-cap ∧ (channel ⇒ post) ∧ ¬roaming ∧ budget ∧
      * activation-boundary}. X / X_s / bot do NOT gate ingest.
      *
-     * @param preExistingRow true if a messages_v2 row existed before this ingest
+     * <p>DOMINANCE (2026-11-21): there is deliberately NO archive /
+     * folder / mute parameter — an opted-in dialog preserves regardless
+     * of Archive folder, custom folder, or mute. The M/T argument is
+     * resolved by the caller: for an opted-in dialog
+     * {@code AliGramPreservation.saveMediaEnabledForDialog} returns true
+     * no matter what the Message Saving toggles say, so a veto there can
+     * never silently block an opted-in dialog (for a non-opted-in dialog
+     * the toggles still apply). Global Automatic media download
+     * (downloadMask) is likewise never an input here.
+     *
+     * <p>Roaming blocks LIVE ingest only as a PAUSE: no ref is created,
+     * so the startup / post-stamp sweep re-attempts the message when the
+     * network is normal again — it is never a permanent failure.
+     *
+     * @param preExistingRow true if a messages_v2 row existed before this ingest.
+     *                       The startup sweep passes false: the sweep replaces
+     *                       this gate with its own no-LIVE-ref check, so a
+     *                       first-ingest failure is re-driven, not permanent.
      */
     public static boolean canIngest(boolean optedIn, boolean deleteMasterOn, boolean editMasterOn,
                                     boolean saveMediaOn, boolean isSecretTtlOnce,
-                                    boolean mediaClassOk, boolean sizeOk, boolean isArchived,
+                                    boolean mediaClassOk, boolean sizeOk,
                                     boolean isChannelPostOk, boolean isRoaming,
                                     boolean withinBudget, int messageDate, int activationTime,
                                     ActivationState activationState, boolean preExistingRow) {
+        return ingestRejectReason(optedIn, deleteMasterOn, editMasterOn, saveMediaOn, isSecretTtlOnce,
+                mediaClassOk, sizeOk, isChannelPostOk, isRoaming, withinBudget,
+                messageDate, activationTime, activationState, preExistingRow) == null;
+    }
+
+    /**
+     * First failing ingest gate, or {@code null} when ingest is allowed.
+     * Gate names are stable strings for the per-message rejection log in
+     * {@code AliGramPreservation.maybeIngest}: only dialog/message ids are
+     * ever logged alongside them — never media content, tokens, or paths.
+     */
+    public static String ingestRejectReason(boolean optedIn, boolean deleteMasterOn, boolean editMasterOn,
+                                            boolean saveMediaOn, boolean isSecretTtlOnce,
+                                            boolean mediaClassOk, boolean sizeOk,
+                                            boolean isChannelPostOk, boolean isRoaming,
+                                            boolean withinBudget, int messageDate, int activationTime,
+                                            ActivationState activationState, boolean preExistingRow) {
         if (!optedIn) {
-            return false;
+            return "OPTED_OUT";
         }
         if (!deleteMasterOn && !editMasterOn) {
-            return false; // (D ∨ E): both off ⇒ no axis could ever consume the blob
+            return "MASTERS_OFF";
         }
         if (!saveMediaOn) {
-            return false;
+            return "SAVE_MEDIA_OFF";
         }
         if (isSecretTtlOnce) {
-            return false;
+            return "SECRET_TTL";
         }
         if (!mediaClassOk || !sizeOk) {
-            return false;
-        }
-        if (isArchived) {
-            return false;
+            return !mediaClassOk ? "MEDIA_CLASS" : "SIZE_CAP";
         }
         if (!isChannelPostOk) {
-            return false;
+            return "CHANNEL_POST";
         }
         if (isRoaming) {
-            return false;
+            return "ROAMING_PAUSED";
         }
         if (!withinBudget) {
-            return false;
+            return "BUDGET";
         }
         if (!isGateOpen(activationState, activationTime)) {
-            return false;
+            return "GATE_CLOSED";
         }
         if (!isAfterActivation(messageDate, activationTime)) {
-            return false;
+            return "BEFORE_ACTIVATION";
         }
         if (preExistingRow) {
-            return false;
+            return "PRE_EXISTING";
         }
-        return true;
+        return null;
     }
 
     /**
@@ -636,6 +667,105 @@ public final class AliGramEligibility {
     /** Attempts budget: 3 failed re-drives → FAILED → release (Phase 2.3 §2.2(e)). */
     public static boolean attemptsExhausted(int attempts) {
         return attempts >= MAX_COPY_ATTEMPTS;
+    }
+
+    // ------------------------------------------------------------------
+    // Preserve Media DOMINANCE + retry-until-success (2026-11-21).
+    //
+    // Ali's requirement: any channel/group with Preserve Media ON must
+    // download + preserve media regardless of Archive folder, custom
+    // folder, mute, channel type (broadcast/megagroup/private/public),
+    // global Automatic media download OFF, or the Message Saving
+    // toggles. The dominance is enforced at the CALLER
+    // (AliGramPreservation.saveMediaEnabledForDialog returns true for an
+    // opted-in dialog, and the Archive/post plumbing was removed from
+    // the MessagesStorage hook entirely) — this class only carries the
+    // pure rules that make those caller decisions testable:
+    //   * canIngest has NO archive/folder/mute input at all: there is
+    //     no parameter a caller could pass to re-enable the gate.
+    //   * isChannelPostOk: only a KNOWN broadcast channel with
+    //     post==false is excluded. Megagroup messages (post==false by
+    //     construction) pass; an unknown chat passes (dominance favours
+    //     preservation — in practice Telegram sets post=true on every
+    //     broadcast post, so the exclusion is defensive-only).
+    //   * effectiveActivationTime: the PENDING-window fix. The stamp is
+    //     server time at stamp moment, so a message that arrived after
+    //     the user enabled preservation but before the stamp has
+    //     date <= stamp and would be lost by the strict '>' rule. The
+    //     enable-moment server estimate (recorded by
+    //     setPreservationEnabled) is the effective boundary when it is
+    //     positive and earlier than the stamp; otherwise the stamp.
+    //     The estimate can only be wrong by timeDifference staleness
+    //     (typically seconds) — the same class of error the stamp
+    //     itself already accepts.
+    //   * Download retry: a failed download retries with exponential
+    //     backoff (60s, 2m, 4m, 8m, 16m, 32m, then 60m) up to 24
+    //     attempts (~a day of retries incl. startup re-drives); only
+    //     then does it go terminal FAILED. Roaming never counts as an
+    //     attempt: it pauses the retry (re-check after
+    //     ROAMING_RETRY_DELAY_MS), it never fails the job.
+    // Legitimate exceptions that still block: secret/TTL/once media
+    // (v1 exclusion, by design) and Ali's own AliGram caps (video cap,
+    // per-chat file count, storage budget). Nothing else.
+    // ------------------------------------------------------------------
+
+    /** Sweep bound: at most this many recent messages per opted-in dialog. */
+    public static final int SWEEP_MAX_MESSAGES_PER_DIALOG = 50;
+    /** Sweep bound: only messages from the last 7 days are re-driven. */
+    public static final int SWEEP_RECENT_WINDOW_SECONDS = 7 * 24 * 3600;
+    /** Download-failure retry ceiling (replaces the old 3-attempt death). */
+    public static final int MAX_DOWNLOAD_ATTEMPTS = 24;
+    /** First download-retry delay; doubles per attempt, capped at 1h. */
+    public static final long DOWNLOAD_RETRY_BASE_DELAY_MS = 60_000L;
+    /** Download-retry delay cap (also the steady-state retry interval). */
+    public static final long DOWNLOAD_RETRY_MAX_DELAY_MS = 3_600_000L;
+    /** Roaming pause: re-check after 15 minutes, never count an attempt. */
+    public static final long ROAMING_RETRY_DELAY_MS = 15 * 60_000L;
+
+    /**
+     * Channel-post rule. {@code isKnownBroadcast} is true only when the
+     * chat was resolved AND is a broadcast channel (not a megagroup).
+     * Megagroup / unknown-chat / non-channel messages always pass.
+     */
+    public static boolean isChannelPostOk(boolean isKnownBroadcast, boolean post) {
+        return !isKnownBroadcast || post;
+    }
+
+    /**
+     * Effective activation boundary for the strict {@code date >}
+     * rule: the enable-moment server estimate when it is positive and
+     * earlier than the stamp, else the stamp itself.
+     */
+    public static int effectiveActivationTime(int stampTime, int enableServerTime) {
+        if (enableServerTime > 0 && enableServerTime < stampTime) {
+            return enableServerTime;
+        }
+        return stampTime;
+    }
+
+    /** Exponential backoff for download retries: 60s, 2m, 4m … capped at 1h. */
+    public static long downloadRetryDelayMs(int attempts) {
+        if (attempts < 1) {
+            return DOWNLOAD_RETRY_BASE_DELAY_MS;
+        }
+        long delay = DOWNLOAD_RETRY_BASE_DELAY_MS << Math.min(attempts - 1, 6);
+        return Math.min(delay, DOWNLOAD_RETRY_MAX_DELAY_MS);
+    }
+
+    /** Download attempts budget: 24 failed downloads → terminal FAILED. */
+    public static boolean downloadAttemptsExhausted(int attempts) {
+        return attempts >= MAX_DOWNLOAD_ATTEMPTS;
+    }
+
+    /**
+     * Startup/sweep re-drive rule for terminal download failures: a
+     * FAILED ref whose last error was a download failure and whose
+     * download budget is not exhausted is re-driven (reset to ENQUEUED),
+     * so a transient failure survives restarts. FAILED for any other
+     * reason (SOURCE_GONE, NO_SPACE, …) is never revived here.
+     */
+    public static boolean shouldRedriveFailedDownload(String lastError, int attempts) {
+        return REASON_DOWNLOAD_FAILED.equals(lastError) && !downloadAttemptsExhausted(attempts);
     }
 
     /** Next revisionSeq: monotonic per message, EDIT rows only (LIVE rows: 0). */
