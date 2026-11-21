@@ -668,7 +668,10 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
                 }
                 stats = AliGramHiddenFolders.filterPreservedStats(stats, perDialog, hidden);
             }
-            AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(stats), 500);
+            // stats is reassigned above when filtering, so it is not
+            // effectively final — capture a final copy for the lambda.
+            final long[] displayStats = stats;
+            AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(displayStats), 500);
         });
     }
 
