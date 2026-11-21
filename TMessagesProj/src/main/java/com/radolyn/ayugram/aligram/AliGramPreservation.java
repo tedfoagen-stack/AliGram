@@ -8,6 +8,7 @@ import android.text.TextUtils;
 
 import com.radolyn.ayugram.messages.AyuSavePreferences;
 
+import org.telegram.SQLite.SQLiteCursor;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.ChatObject;
@@ -61,6 +62,16 @@ public final class AliGramPreservation {
     private static final String KEY_SINCE_PREFIX = "ayuPreserveMediaSince_";
     private static final String KEY_STATE_PREFIX = "ayuPreserveMediaState_";
     private static final String KEY_DEVICE_TIME_PREFIX = "ayuPreserveMediaDeviceTime_";
+    /**
+     * PENDING-window fix (2026-11-21): server-time estimate recorded when
+     * preservation is enabled (best effort, {@code getCurrentTime()}).
+     * The stamp is taken later, so a message arriving between enable and
+     * stamp has {@code date <= stamp} and would be lost by the strict
+     * {@code date > activation} rule; the effective boundary is this
+     * enable-moment estimate instead (see
+     * {@link AliGramEligibility#effectiveActivationTime}).
+     */
+    private static final String KEY_ENABLE_SERVER_PREFIX = "ayuPreserveMediaEnableServer_";
     private static final String STATE_PENDING = "PENDING";
     private static final String STATE_STAMPED = "STAMPED";
     private static final String STATE_OFF = "OFF";
@@ -203,6 +214,43 @@ public final class AliGramPreservation {
         }
     }
 
+    /** Enable-moment server-time estimate (0 = unknown / never recorded). */
+    public static int getEnableServerTime(int account, long dialogId) {
+        try {
+            return prefsFor(account).getInt(KEY_ENABLE_SERVER_PREFIX + dialogId, 0);
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Effective activation boundary for the strict {@code date >} rule:
+     * the enable-moment estimate when it is positive and earlier than
+     * the stamp, else the stamp itself. Covers the PENDING window
+     * (messages that arrived after enable but before the stamp).
+     */
+    public static int effectiveActivation(int account, long dialogId) {
+        Activation act = getActivation(account, dialogId);
+        return AliGramEligibility.effectiveActivationTime(act.time, getEnableServerTime(account, dialogId));
+    }
+
+    /** All dialog ids with Preserve Media currently opted in (for the sweep). */
+    public static List<Long> optedInDialogIds(int account) {
+        List<Long> out = new ArrayList<>();
+        try {
+            for (Map.Entry<String, ?> entry : prefsFor(account).getAll().entrySet()) {
+                if (entry.getKey().startsWith(KEY_FLAG_PREFIX) && Boolean.TRUE.equals(entry.getValue())) {
+                    try {
+                        out.add(Long.parseLong(entry.getKey().substring(KEY_FLAG_PREFIX.length())));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
     /**
      * Toggle the per-chat opt-in. Enabling resets the activation record to
      * PENDING and tries to stamp immediately; the gate stays closed until a
@@ -217,6 +265,18 @@ public final class AliGramPreservation {
             editor.putBoolean(KEY_FLAG_PREFIX + dialogId, enabled);
             if (enabled) {
                 editor.putString(KEY_STATE_PREFIX + dialogId, STATE_PENDING);
+                // PENDING-window fix: record the enable-moment server-time
+                // estimate now (best effort; 0 = unknown, stamp wins).
+                // The stamp comes later, after a server round in this
+                // process; without this, messages arriving between enable
+                // and stamp would be lost (date <= stamp).
+                try {
+                    int enableServer = ConnectionsManager.getInstance(account).getCurrentTime();
+                    if (enableServer > 0) {
+                        editor.putInt(KEY_ENABLE_SERVER_PREFIX + dialogId, enableServer);
+                    }
+                } catch (Throwable ignored) {
+                }
                 editor.apply();
                 maybeStampPending(account);
             } else {
@@ -310,6 +370,17 @@ public final class AliGramPreservation {
         editor.apply();
         FileLog.d(TAG + ": stamped " + pendingKeys.size() + " pending activation(s) at server time "
                 + serverNow);
+        // The stamp just opened the gate: re-attempt ingest for messages
+        // that arrived in the PENDING window (after enable, before this
+        // stamp) and for any first-ingest failure — otherwise they are
+        // lost forever. Runs async on copyQueue via the storage queue.
+        copyQueue.postRunnable(() -> {
+            try {
+                sweepMissedMessages(account);
+            } catch (Throwable e) {
+                FileLog.e(TAG + ": post-stamp sweep failed", e);
+            }
+        });
     }
 
     /**
@@ -354,9 +425,25 @@ public final class AliGramPreservation {
         }
     }
 
-    /** M/T-only semantics (AyuMessageUtils prefs overload, without the D gate). */
+    /**
+     * M/T-only semantics (AyuMessageUtils prefs overload, without the D gate).
+     *
+     * <p>DOMINANCE (2026-11-21, Ali's requirement): for a dialog with
+     * per-chat Preserve Media ON, this returns true REGARDLESS of the
+     * legacy Message Saving toggles (master + the five per-type rows).
+     * The opt-in is authoritative; a veto there must never silently
+     * block an opted-in dialog. The toggles are NOT deleted and still
+     * apply exactly as before to every non-opted-in dialog. No other
+     * caller exists (verified 2026-11-21: only maybeIngest,
+     * liveSyncEdit and startupReconcile call this method), so Ayu View
+     * Deleted / Edits History behaviour for non-opted-in dialogs is
+     * unchanged.
+     */
     public static boolean saveMediaEnabledForDialog(int account, long dialogId) {
         try {
+            if (isOptedIn(account, dialogId)) {
+                return true;
+            }
             if (!NaConfig.INSTANCE.getMessageSavingSaveMedia().Bool()) {
                 return false;
             }
@@ -571,7 +658,7 @@ public final class AliGramPreservation {
         }
         Activation act = getActivation(account, dialogId);
         return AliGramEligibility.isGateOpen(act.state, act.time)
-                && AliGramEligibility.isAfterActivation(message.date, act.time);
+                && AliGramEligibility.isAfterActivation(message.date, effectiveActivation(account, dialogId));
     }
 
     // ==================================================================
@@ -718,10 +805,61 @@ public final class AliGramPreservation {
      * branch) immediately after the :12680 auto-download block.
      * {@code preExisting} is the probe result computed BEFORE this call's
      * REPLACE (null = probe not evaluated, e.g. P off — ineligible anyway).
-     * Never treats {@code downloadMask != 0} as its own gate.
+     * Never treats {@code downloadMask != 0} as its own gate: global
+     * Automatic media download OFF never blocks an opted-in dialog.
+     *
+     * <p>HIDDEN-FOLDER / DISPLAY-INDEPENDENCE CONTRACT (2026-11-21):
+     * ingest never consults folder, mute, hide, or display state.
+     * There is no folder parameter, no mute read, and no visibility
+     * check anywhere on this path — a message is ingested purely on
+     * opt-in + media + caps + activation, whether its dialog sits in
+     * Archive, a custom folder, or (later) a hidden folder, and whether
+     * it is muted or not. Hiding is display-only; it must never gate
+     * preservation. The ONE future intersection is the "AliGram
+     * preserved media" settings list, which names dialogs and would
+     * leak a hidden one — that list (not ingest) must be filtered
+     * while locked, when the hidden-folder feature lands. Nothing in
+     * this method needs to change for that.
+     *
+     * <p>Ingest needs no chat to be opened and does not rely on FCM
+     * push: the hook runs on every message store (getDifference /
+     * updates / history put), and the startup / post-stamp sweep
+     * ({@link #sweepMissedMessages}) re-drives anything it missed.
      */
-    public static void maybeIngest(int account, TLRPC.Message message, Boolean preExisting,
-                                   boolean isArchived, boolean isChannelPostOk) {
+    public static void maybeIngest(int account, TLRPC.Message message, Boolean preExisting) {
+        maybeIngestInternal(account, message, preExisting, false);
+    }
+
+    /**
+     * Channel-post rule for one message. Only a KNOWN broadcast channel
+     * with {@code post == false} is excluded — and in practice Telegram
+     * sets {@code post=true} on every broadcast post, so this is
+     * defensive-only. A megagroup/supergroup message
+     * ({@code channel_id != 0, post == false}) passes: it is a group
+     * message, not a non-post. An unresolvable chat also passes
+     * (dominance favours preservation over guessing).
+     */
+    private static boolean isChannelPostOkForMessage(int account, TLRPC.Message message) {
+        try {
+            if (message == null || message.peer_id == null || message.peer_id.channel_id == 0) {
+                return true;
+            }
+            TLRPC.Chat chat = MessagesController.getInstance(account).getChat(message.peer_id.channel_id);
+            boolean isKnownBroadcast = chat != null && ChatObject.isChannelAndNotMegaGroup(chat);
+            return AliGramEligibility.isChannelPostOk(isKnownBroadcast, message.post);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    /**
+     * Shared ingest body. {@code fromSweep} replaces the pre-existing-row
+     * gate with the sweep's own no-LIVE-ref check (see
+     * {@link #sweepMissedIngest}): a first putMessagesInternal failure
+     * is re-driven, not permanent.
+     */
+    private static void maybeIngestInternal(int account, TLRPC.Message message, Boolean preExisting,
+                                            boolean fromSweep) {
         try {
             if (message == null || !ensureInitialized(account)) {
                 return;
@@ -731,6 +869,7 @@ public final class AliGramPreservation {
                 return;
             }
             Activation act = getActivation(account, dialogId);
+            int effectiveTime = effectiveActivation(account, dialogId);
             MediaIdentity ident = identifyMedia(account, message);
             boolean dOn = deleteMasterOn();
             boolean eOn = editMasterOn();
@@ -738,6 +877,7 @@ public final class AliGramPreservation {
             boolean mediaOk = AliGramEligibility.isPreservableClass(ident.mediaClass);
             boolean sizeOk = ident.expectedFileName != null
                     && AliGramEligibility.isWithinSizeCap(ident.mediaClass, ident.expectedSize, currentPreset(account), limits());
+            boolean postOk = isChannelPostOkForMessage(account, message);
             boolean roaming = isRoaming(account);
             PreservedRefDao dao = AliGramData.refDao();
             if (dao == null) {
@@ -748,17 +888,26 @@ public final class AliGramPreservation {
                     dao.getPendingJobCountForDialog(userId, dialogId),
                     dao.getPendingBytesForDialog(userId, dialogId),
                     ident.expectedSize, limits());
-            boolean eligible = AliGramEligibility.canIngest(true, dOn, eOn, mt, ident.isSecretTtlOnce,
-                    mediaOk, sizeOk, isArchived, isChannelPostOk, roaming, withinBudget,
-                    message.date, act.time, act.state, preExisting != null && preExisting);
-            if (!eligible) {
+            boolean preExistingRow = !fromSweep && preExisting != null && preExisting;
+            String rejectReason = AliGramEligibility.ingestRejectReason(true, dOn, eOn, mt, ident.isSecretTtlOnce,
+                    mediaOk, sizeOk, postOk, roaming, withinBudget,
+                    message.date, effectiveTime, act.state, preExistingRow);
+            if (rejectReason != null) {
+                // Log only post-activation rejections: pre-activation /
+                // history traffic is expected noise, but a post-activation
+                // message that does not preserve is always diagnosable.
+                // IDs only — never media content, tokens, or file paths.
+                if (AliGramEligibility.isAfterActivation(message.date, effectiveTime)) {
+                    FileLog.d(TAG + ": ingest rejected dialog=" + dialogId + " msg=" + message.id
+                            + " gate=" + rejectReason + (fromSweep ? " sweep" : ""));
+                }
                 return;
             }
             if (dao.getLiveRef(userId, dialogId, message.id) != null) {
                 return; // idempotency: duplicate push + getDifference replay
             }
             PreservedRef ref = newPreservedRef(account, userId, dialogId, message.id, "LIVE", 0,
-                    ident, AliGramEligibility.STATE_ENQUEUED, "INGEST");
+                    ident, AliGramEligibility.STATE_ENQUEUED, fromSweep ? "SWEEP" : "INGEST");
             ref.editDate = message.edit_date;
             try {
                 ref.refId = dao.insertRef(ref);
@@ -782,6 +931,135 @@ public final class AliGramPreservation {
             }
         } catch (Throwable e) {
             FileLog.e(TAG + ": maybeIngest failed", e);
+        }
+    }
+
+    // ==================================================================
+    // Missed-message sweep (retry-until-success, 2026-11-21)
+    // ==================================================================
+
+    /**
+     * Re-attempt ingest for recent messages_v2 rows in opted-in dialogs
+     * that have no PreservedRef. This is what makes a first-ingest
+     * failure non-permanent: the old code rejected a later re-put on
+     * {@code preExistingRow}, so a message whose first ingest failed
+     * (roaming, crash, PENDING window, transient gate) was lost.
+     *
+     * <p>Bounds (deliberate, not bulk history): per dialog, the most
+     * recent {@link AliGramEligibility#SWEEP_MAX_MESSAGES_PER_DIALOG}
+     * messages newer than the effective activation AND newer than
+     * {@link AliGramEligibility#SWEEP_RECENT_WINDOW_SECONDS} ago, with
+     * no LIVE ref. Everything else is re-evaluated by the normal
+     * ingest gates inside {@link #maybeIngestInternal} (secret/TTL and
+     * Ali's caps still block; roaming pauses). Runs on app startup
+     * (end of {@link #startupReconcile}) and after an activation is
+     * stamped (end of {@link #stampPendingNow}) — never on chat open,
+     * and never from an FCM push.
+     *
+     * <p>Threading: the mid scan runs on the storage queue (raw
+     * messages_v2 reads belong there); ingest runs on copyQueue, where
+     * {@code MessagesStorage.getMessage} (storage-queue latch) is safe.
+     */
+    public static void sweepMissedMessages(int account) {
+        try {
+            MessagesStorage.getInstance(account).getStorageQueue().postRunnable(() -> {
+                try {
+                    sweepMissedScan(account);
+                } catch (Throwable e) {
+                    FileLog.e(TAG + ": sweepMissedScan failed", e);
+                }
+            });
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": sweepMissedMessages failed", e);
+        }
+    }
+
+    /** Storage-queue half of the sweep: collect (dialogId, mid) pairs. */
+    private static void sweepMissedScan(int account) {
+        try {
+            if (isRoaming(account)) {
+                return; // pause: roaming never fails the sweep, it defers it
+            }
+            int serverNow = 0;
+            try {
+                serverNow = ConnectionsManager.getInstance(account).getCurrentTime();
+            } catch (Throwable ignored) {
+            }
+            List<long[]> targets = new ArrayList<>();
+            for (long dialogId : optedInDialogIds(account)) {
+                Activation act = getActivation(account, dialogId);
+                if (!AliGramEligibility.isGateOpen(act.state, act.time)) {
+                    continue; // PENDING gate closed; the post-stamp sweep covers it
+                }
+                int boundary = effectiveActivation(account, dialogId);
+                int since = boundary;
+                if (serverNow > 0) {
+                    since = Math.max(boundary, serverNow - AliGramEligibility.SWEEP_RECENT_WINDOW_SECONDS);
+                }
+                SQLiteCursor cursor = null;
+                try {
+                    cursor = MessagesStorage.getInstance(account).getDatabase().queryFinalized(
+                            "SELECT mid FROM messages_v2 WHERE uid = ? AND date > ? ORDER BY date DESC LIMIT ?",
+                            dialogId, since, AliGramEligibility.SWEEP_MAX_MESSAGES_PER_DIALOG);
+                    while (cursor.next()) {
+                        targets.add(new long[]{dialogId, cursor.intValue(0)});
+                    }
+                } catch (Throwable e) {
+                    FileLog.e(TAG + ": sweep scan failed for dialog " + dialogId, e);
+                } finally {
+                    if (cursor != null) {
+                        cursor.dispose();
+                    }
+                }
+            }
+            if (targets.isEmpty()) {
+                return;
+            }
+            FileLog.d(TAG + ": sweep found " + targets.size() + " recent candidate message(s)");
+            copyQueue.postRunnable(() -> {
+                try {
+                    sweepMissedIngest(account, targets);
+                } catch (Throwable e) {
+                    FileLog.e(TAG + ": sweepMissedIngest failed", e);
+                }
+            });
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": sweepMissedScan failed", e);
+        }
+    }
+
+    /** copyQueue half of the sweep: re-drive each candidate through ingest. */
+    private static void sweepMissedIngest(int account, List<long[]> targets) {
+        try {
+            if (isRoaming(account)) {
+                return; // pause, not fail; the next sweep retries
+            }
+            PreservedRefDao dao = AliGramData.refDao();
+            if (dao == null) {
+                return;
+            }
+            long userId = ownUserId(account);
+            for (long[] target : targets) {
+                long dialogId = target[0];
+                int messageId = (int) target[1];
+                try {
+                    if (!isOptedIn(account, dialogId)) {
+                        continue;
+                    }
+                    if (dao.getLiveRef(userId, dialogId, messageId) != null) {
+                        continue; // already preserved — the sweep's replacement for preExistingRow
+                    }
+                    TLRPC.Message message = MessagesStorage.getInstance(account).getMessage(dialogId, messageId);
+                    if (message == null) {
+                        continue;
+                    }
+                    maybeIngestInternal(account, message, Boolean.FALSE, true);
+                } catch (Throwable e) {
+                    FileLog.e(TAG + ": sweep ingest failed for dialog " + dialogId + " msg " + messageId, e);
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": sweepMissedIngest failed", e);
         }
     }
 
@@ -933,6 +1211,15 @@ public final class AliGramPreservation {
                     if (!revalidateJobForCopy(account, job)) {
                         continue;
                     }
+                    // The download succeeded: the copy phase starts with
+                    // a fresh attempts budget. (The counter is shared, so
+                    // without this a job that survived many transient
+                    // download retries would die on its first copy
+                    // failure under the 3-attempt copy budget.)
+                    if (job.attempts != 0) {
+                        job.attempts = 0;
+                        dao.updateRef(job);
+                    }
                     if (file != null && file.isFile()) {
                         job.sourcePath = file.getAbsolutePath();
                         job.sourceSize = file.length();
@@ -1023,18 +1310,39 @@ public final class AliGramPreservation {
                         terminateJob(job, AliGramEligibility.STATE_GATE_OFF, "P", AliGramEligibility.REASON_GATE_OFF);
                         continue;
                     }
+                    if (isRoaming(account)) {
+                        // PAUSE, not fail: roaming never counts as an
+                        // attempt. Stay ENQUEUED and re-check in 15 min;
+                        // the startup/post-stamp sweep is the other net.
+                        job.state = AliGramEligibility.STATE_ENQUEUED;
+                        job.updatedAt = System.currentTimeMillis() / 1000;
+                        dao.updateRef(job);
+                        final long refId = job.refId;
+                        copyQueue.postRunnable(() -> {
+                            try {
+                                retryDownloadForRef(refId);
+                            } catch (Throwable e) {
+                                FileLog.e(TAG + ": roaming retryDownload failed", e);
+                            }
+                        }, AliGramEligibility.ROAMING_RETRY_DELAY_MS);
+                        continue;
+                    }
                     job.attempts++;
                     job.updatedAt = System.currentTimeMillis() / 1000;
-                    if (AliGramEligibility.attemptsExhausted(job.attempts)) {
+                    if (AliGramEligibility.downloadAttemptsExhausted(job.attempts)) {
                         job.state = AliGramEligibility.STATE_FAILED;
                         job.lastError = AliGramEligibility.REASON_DOWNLOAD_FAILED;
                         dao.updateRef(job);
                         mirrorRemoveForRef(job);
                         releaseDeferredDeletesForRef(job.accountId, job.refId);
                     } else {
+                        // Retry-until-success (2026-11-21): exponential
+                        // backoff, 60s doubling to a 1h cap, up to 24
+                        // attempts (~a day incl. startup re-drives) —
+                        // the old code died after 3 attempts.
                         job.state = AliGramEligibility.STATE_ENQUEUED;
                         dao.updateRef(job);
-                        long delayMs = job.attempts == 1 ? 60_000L : 600_000L;
+                        long delayMs = AliGramEligibility.downloadRetryDelayMs(job.attempts);
                         final long refId = job.refId;
                         copyQueue.postRunnable(() -> {
                             try {
@@ -1068,14 +1376,33 @@ public final class AliGramPreservation {
                 terminateJob(job, AliGramEligibility.STATE_GATE_OFF, "P/D+E", AliGramEligibility.REASON_GATE_OFF);
                 return;
             }
+            if (isRoaming(job.accountId)) {
+                // Still roaming: stay ENQUEUED and re-check later, without
+                // counting an attempt or failing the job.
+                copyQueue.postRunnable(() -> {
+                    try {
+                        retryDownloadForRef(refId);
+                    } catch (Throwable e) {
+                        FileLog.e(TAG + ": roaming retryDownload failed", e);
+                    }
+                }, AliGramEligibility.ROAMING_RETRY_DELAY_MS);
+                return;
+            }
             PendingLoad load = job.expectedFileName == null ? null
                     : pendingLoads.get(pendingKey(job.accountId, job.expectedFileName));
             if (load == null) {
-                job.state = AliGramEligibility.STATE_FAILED;
-                job.lastError = AliGramEligibility.REASON_DOWNLOAD_FAILED;
-                dao.updateRef(job);
-                mirrorRemoveForRef(job);
-                releaseDeferredDeletesForRef(job.accountId, job.refId);
+                // The in-memory TL objects died with the process (or were
+                // never built): rebuild from cache4.db instead of failing
+                // — the old code went terminal FAILED here.
+                if (AliGramEligibility.downloadAttemptsExhausted(job.attempts)) {
+                    job.state = AliGramEligibility.STATE_FAILED;
+                    job.lastError = AliGramEligibility.REASON_DOWNLOAD_FAILED;
+                    dao.updateRef(job);
+                    mirrorRemoveForRef(job);
+                    releaseDeferredDeletesForRef(job.accountId, job.refId);
+                    return;
+                }
+                redriveEnqueuedJob(job.accountId, job);
                 return;
             }
             load.lastProgressMs = System.currentTimeMillis();
@@ -1136,6 +1463,12 @@ public final class AliGramPreservation {
         if (job == null || !AliGramEligibility.STATE_DOWNLOADING.equals(job.state)) {
             return;
         }
+        if (isRoaming(job.accountId)) {
+            // Pause while roaming: no probe, no attempt counted; the
+            // next sweep / retry re-checks when the network is normal.
+            scheduleWatchdog(refId, AliGramEligibility.ROAMING_RETRY_DELAY_MS);
+            return;
+        }
         PendingLoad load = job.expectedFileName == null ? null
                 : pendingLoads.get(pendingKey(job.accountId, job.expectedFileName));
         if (load == null) {
@@ -1154,6 +1487,7 @@ public final class AliGramPreservation {
             job.sourceSize = onDisk.length();
             job.sourceMtime = onDisk.lastModified();
             job.state = AliGramEligibility.STATE_COPYING;
+            job.attempts = 0; // download done: fresh copy budget (see onFileLoadedInternal)
             dao.updateRef(job);
             mirrorPut(job);
             // Phase 3.1 (D-04): the file just materialised — refresh any
@@ -1182,6 +1516,7 @@ public final class AliGramPreservation {
             job.sourceSize = tempSource.length();
             job.sourceMtime = tempSource.lastModified();
             job.state = AliGramEligibility.STATE_COPYING;
+            job.attempts = 0; // download done: fresh copy budget (see onFileLoadedInternal)
             dao.updateRef(job);
             mirrorPut(job);
             refreshDeferredForPath(job.sourcePath, job.sourceSize, job.sourceMtime);
@@ -2060,7 +2395,8 @@ public final class AliGramPreservation {
                     && AliGramEligibility.isWithinSizeCap(newIdent.mediaClass, newIdent.expectedSize,
                     currentPreset(account), limits());
             if (!AliGramEligibility.canEnrolNewMediaAtEdit(true, dOn, eOn, mt, newIdent.isSecretTtlOnce,
-                    mediaOk, sizeOk, newMessage.edit_date, act.time, act.state, false, false)) {
+                    mediaOk, sizeOk, newMessage.edit_date, effectiveActivation(account, dialogId),
+                    act.state, false, false)) {
                 return;
             }
             PreservedRefDao dao = AliGramData.refDao();
@@ -2728,7 +3064,12 @@ public final class AliGramPreservation {
         //    re-drive PINNED rows whose source is on disk; PINNED rows
         //    with no source go straight to UNAVAILABLE (D-11 — they can
         //    never be re-downloaded after a restart, so the attempts
-        //    budget is not burned on them).
+        //    budget is not burned on them). FAILED rows whose last error
+        //    was a download failure are re-driven too (retry-until-
+        //    success, 2026-11-21) unless the 24-attempt budget is spent.
+        //    ROAMING PAUSES HERE, IT NEVER TERMINATES: a startup while
+        //    roaming used to GATE_OFF every pending job; now the rows are
+        //    left untouched and the next sweep retries them.
         try {
             long userId = ownUserId(account);
             for (PreservedRef ref : dao.getNonTerminalRefs()) {
@@ -2737,8 +3078,7 @@ public final class AliGramPreservation {
                 }
                 boolean gatesOn = isOptedIn(account, ref.dialogId)
                         && (deleteMasterOn() || editMasterOn())
-                        && saveMediaEnabledForDialog(account, ref.dialogId)
-                        && !isRoaming(account);
+                        && saveMediaEnabledForDialog(account, ref.dialogId);
                 if (!gatesOn) {
                     if (AliGramEligibility.STATE_PINNED.equals(ref.state)) {
                         continue; // in-flight freeze copies complete and bind (C-15)
@@ -2746,6 +3086,9 @@ public final class AliGramPreservation {
                     terminateJob(ref, AliGramEligibility.STATE_GATE_OFF, "startup",
                             AliGramEligibility.REASON_GATE_OFF);
                     continue;
+                }
+                if (isRoaming(account)) {
+                    continue; // pause: leave the row exactly as it is
                 }
                 if (AliGramEligibility.STATE_DOWNLOADING.equals(ref.state)
                         || AliGramEligibility.STATE_COPYING.equals(ref.state)) {
@@ -2789,6 +3132,35 @@ public final class AliGramPreservation {
         } catch (Throwable e) {
             FileLog.e(TAG + ": gate re-check/re-drive failed", e);
         }
+        // 4b. Retry-until-success (2026-11-21): FAILED is terminal, so
+        // step 4's non-terminal loop never sees these rows. Re-drive a
+        // FAILED row whose last error was a download failure and whose
+        // 24-attempt budget is not spent — a transient failure survives
+        // restarts instead of dying after 3 attempts. FAILED for any
+        // other reason (SOURCE_GONE, NO_SPACE, …) is untouched, and a
+        // roaming startup leaves everything paused (see step 4).
+        try {
+            if (!isRoaming(account)) {
+                for (PreservedRef ref : dao.getAllRefs()) {
+                    if (ref.accountId != account
+                            || !AliGramEligibility.STATE_FAILED.equals(ref.state)
+                            || !AliGramEligibility.shouldRedriveFailedDownload(ref.lastError, ref.attempts)) {
+                        continue;
+                    }
+                    if (!isOptedIn(account, ref.dialogId)
+                            || (!deleteMasterOn() && !editMasterOn())
+                            || !saveMediaEnabledForDialog(account, ref.dialogId)) {
+                        continue;
+                    }
+                    ref.state = AliGramEligibility.STATE_ENQUEUED;
+                    ref.updatedAt = System.currentTimeMillis() / 1000;
+                    dao.updateRef(ref);
+                    redriveEnqueuedJob(account, ref);
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": failed-download re-drive failed", e);
+        }
         // 5. Sweep unanchored refs + refcount-0 blobs; release orphaned deferred deletes.
         try {
             sweepRefcountZeroBlobs(account);
@@ -2806,6 +3178,16 @@ public final class AliGramPreservation {
             capturedDeletes.entrySet().removeIf(entry -> entry.getValue() < cutoff);
         } catch (Throwable e) {
             FileLog.e(TAG + ": startup sweep failed", e);
+        }
+        // 6. Missed-message sweep (retry-until-success, 2026-11-21):
+        // re-attempt ingest for recent messages_v2 rows in opted-in
+        // dialogs that have no PreservedRef — first-ingest failures
+        // (PENDING window, roaming, crash) are re-driven, not lost.
+        // Async: storage-queue scan, then copyQueue ingest.
+        try {
+            sweepMissedMessages(account);
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": startup missed-message sweep failed", e);
         }
     }
 
@@ -2842,6 +3224,11 @@ public final class AliGramPreservation {
                 FileLog.e(TAG + ": redrive message lookup failed", e);
             }
             if (message == null) {
+                // The message itself is gone from cache4.db: count this
+                // failed re-drive against the download budget, so a
+                // permanently-gone message exhausts the 24-attempt budget
+                // across restarts instead of churning every startup.
+                ref.attempts++;
                 ref.state = AliGramEligibility.STATE_FAILED;
                 ref.lastError = AliGramEligibility.REASON_DOWNLOAD_FAILED;
                 ref.updatedAt = System.currentTimeMillis() / 1000;
@@ -3216,7 +3603,8 @@ public final class AliGramPreservation {
                 SharedPreferences.Editor editor = prefs.edit();
                 for (String key : prefs.getAll().keySet()) {
                     if (key.startsWith(KEY_FLAG_PREFIX) || key.startsWith(KEY_SINCE_PREFIX)
-                            || key.startsWith(KEY_STATE_PREFIX) || key.startsWith(KEY_DEVICE_TIME_PREFIX)) {
+                            || key.startsWith(KEY_STATE_PREFIX) || key.startsWith(KEY_DEVICE_TIME_PREFIX)
+                            || key.startsWith(KEY_ENABLE_SERVER_PREFIX)) {
                         editor.remove(key);
                     }
                 }
