@@ -14,6 +14,7 @@ import android.text.TextUtils;
 
 import com.radolyn.ayugram.AyuConstants;
 import com.radolyn.ayugram.AyuUtils;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.database.dao.DeletedMessageDao;
 import com.radolyn.ayugram.database.dao.EditedMessageDao;
@@ -156,13 +157,20 @@ public class AyuMessagesController {
             }
         }
 
-        withDaoRetry(
+        Long fakeId = withDaoRetry(
                 "onMessageEditedInner#insert",
-                () -> {
-                    editedMessageDao.insert(revision);
-                    return null;
-                }
+                () -> editedMessageDao.insert(revision)
         );
+
+        // --- AliGram hook (H-E Phase B, Phase 2.3 §1.6): bind the Stage-A
+        // pin / LIVE conversion to this revision's fakeId + revisionSeq.
+        // fakeId comes from the insert return — never from Room's in-place
+        // PK assignment.
+        try {
+            AliGramPreservation.bindEditRevision(prefs, newMessage, oldMessage, sameMedia, fakeId == null ? 0 : fakeId);
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
 
         AndroidUtilities.runOnUIThread(() -> NotificationCenter.getInstance(prefs.getAccountId()).postNotificationName(AyuConstants.MESSAGE_EDITED_NOTIFICATION, prefs.getDialogId(), prefs.getMessageId()));
     }
@@ -203,6 +211,13 @@ public class AyuMessagesController {
 
     private void onMessageDeletedInner(AyuSavePreferences prefs) {
         if (!AyuSavePreferences.saveDeletedMessageFor(prefs.getAccountId(), prefs.getDialogId(), prefs.getFromUserId())) {
+            // --- AliGram hook (H-D gate, Phase 2.3 §4.5): the delete gate
+            // blocked the capture — the LIVE ref loses its anchor.
+            try {
+                AliGramPreservation.onDeleteGateBlocked(prefs);
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
             return;
         }
 
@@ -235,6 +250,13 @@ public class AyuMessagesController {
 
         if (fakeMsgId == null) {
             return;
+        }
+
+        // --- AliGram hook (H-D bind, Phase 2.3 §4.4): LIVE -> DELETED.
+        try {
+            AliGramPreservation.bindDeleted(prefs, fakeMsgId);
+        } catch (Throwable e) {
+            FileLog.e(e);
         }
 
         if (msg != null && msg.reactions != null) {

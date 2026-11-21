@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.radolyn.ayugram.AyuConstants;
 import com.radolyn.ayugram.AyuUtils;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.entities.EditedMessage;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 import com.radolyn.ayugram.proprietary.AyuMessageUtils;
@@ -720,7 +721,21 @@ public class AyuMessageHistory extends NekoDelegateFragment {
         }
         // prefer the current message's cached media only if the original file still exists
         boolean localFileFound = false;
-        if (messageObject.isVoice()) {
+        // --- AliGram hook (H-R): prefer the preserved blob copy for this
+        // revision over the live message's media and over the public
+        // attachments dir. UI-safe: in-memory map lookup only, never a
+        // DAO call from the render path.
+        File preservedFile = AliGramPreservation.resolvePreservedFileForRevision(currentAccount, editedMessage.fakeId);
+        if (preservedFile != null) {
+            if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_FILE) {
+                updateDocumentMediaWithLocalFile(msg, preservedFile, editedMessage);
+            } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_STORY) {
+                updateStoryMediaWithLocalFile(msg, preservedFile);
+            } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_PHOTO) {
+                updatePhotoMediaWithLocalFile(msg, preservedFile);
+            }
+            localFileFound = true;
+        } else if (messageObject.isVoice()) {
             msg.media = messageObject.messageOwner.media;
         } else if (editedMessage.documentType == AyuConstants.DOCUMENT_TYPE_FILE) {
             File originalPath = FileLoader.getInstance(currentAccount).getPathToMessage(messageObject.messageOwner);

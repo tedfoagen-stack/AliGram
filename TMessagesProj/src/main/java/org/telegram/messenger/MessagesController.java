@@ -139,6 +139,8 @@ import java.util.stream.Collectors;
 
 import me.vkryl.core.BitwiseUtils;
 
+import com.radolyn.ayugram.aligram.AliGramPreservation;
+
 import tw.nekomimi.nekogram.NekoConfig;
 import tw.nekomimi.nekogram.filters.AyuFilter;
 import tw.nekomimi.nekogram.filters.ReactionFilter;
@@ -16357,6 +16359,13 @@ public class MessagesController extends BaseController implements NotificationCe
         getMessagesStorage().cleanup(false);
         cleanup();
         getContactsController().deleteUnknownAppAccounts();
+        // --- AliGram hook (P-8): remove this account's preserved blobs,
+        // refs, deferred rows and per-chat activation prefs.
+        try {
+            AliGramPreservation.purgeAccount(currentAccount);
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
     }
 
     public void registerForPush(@PushListenerController.PushType int pushType, String regid) {
@@ -19967,6 +19976,14 @@ public class MessagesController extends BaseController implements NotificationCe
                                 var topicId = MessageObject.getTopicId(currentAccount, msg, isForum(dialogId));
                                 var prefs = new AyuSavePreferences(msg, currentAccount, dialogId, topicId, msg.id, (int)(currentTime / 1000));
                                 ayuMessagesController.onMessageDeleted(prefs);
+                                // --- AliGram hook: the capture above ran
+                                // first — the mark sweep below must not
+                                // terminate the LIVE ref before it binds.
+                                try {
+                                    AliGramPreservation.noteCapturedDelete(currentAccount, dialogId, msg.id);
+                                } catch (Throwable e) {
+                                    FileLog.e(e);
+                                }
                             }
                         }
                         notificationsToSend.put(dialogId, messageIds);
@@ -21479,6 +21496,26 @@ public class MessagesController extends BaseController implements NotificationCe
             for (int a = 0, size = tasks.size(); a < size; a++) {
                 TL_update.TL_updateEncryptedMessagesRead update = tasks.get(a);
                 getMessagesStorage().createTaskForSecretChat(update.chat_id, update.max_date, update.date, 1, null);
+            }
+        }
+
+        // --- AliGram hook (R-7): a server round completed in this process —
+        // a successful getDifference / updates batch. Stamping a PENDING
+        // activation requires this event in the current process, never a
+        // restored timeDifference alone (Phase 2.3 §1.5 + phase3 §3.5).
+        //
+        // Phase 3.1: ONLY for server-originated batches. processUpdateArray
+        // is also called with locally synthesised read-state updates built
+        // from cache (MessagesController:7563, :7791, :7805 — date == 0,
+        // fromGetDifference == false), which prove no server contact and
+        // must never set roundSeen. Server batches arrive either from
+        // getDifference (fromGetDifference == true, date == 0) or from
+        // processUpdates (fromGetDifference == false, date == server time).
+        if (fromGetDifference || date != 0) {
+            try {
+                AliGramPreservation.onServerRoundCompleted(currentAccount);
+            } catch (Throwable e) {
+                FileLog.e(e);
             }
         }
 

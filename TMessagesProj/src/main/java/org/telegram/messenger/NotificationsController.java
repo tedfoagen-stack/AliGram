@@ -6325,9 +6325,14 @@ public class NotificationsController extends BaseController implements Notificat
             case 0:
                 return R.drawable.notification;
             case 1:
-                return R.drawable.nagramx_notification;
+                return R.drawable.aligram_notification;
             case 2:
-                return R.drawable.nagram_notification;
+                // O-04 (Phase 3.2): was R.drawable.nagram_notification (legacy
+                // Nagram icon, now deleted). Re-pointed at the AliGram
+                // notification icon; option 2 is therefore the same icon as
+                // option 1. The entry is kept (not removed) so stored
+                // preference values 0-3 keep their meaning.
+                return R.drawable.aligram_notification;
             case 3:
                 return R.drawable.neko_notification;
         }
