@@ -31054,7 +31054,6 @@ public class ChatActivity extends BaseFragment implements
 
     Bulletin.Delegate bulletinDelegate;
 
-    @Override
     // --- AliGram hidden folders: auto-lock while inside a hidden chat. ---
     private Runnable aliGramAutoLockCheckRunnable;
 
@@ -31107,6 +31106,7 @@ public class ChatActivity extends BaseFragment implements
         }
     }
 
+    @Override
     public void onResume() {
         super.onResume();
         // --- AliGram hidden folders: (re)schedule the auto-lock check.
