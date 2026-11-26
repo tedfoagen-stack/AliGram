@@ -3,6 +3,16 @@ import org.gradle.internal.os.OperatingSystem
 
 plugins {
     id 'com.android.application'
+    // AliGram R1 (FCM): the Google Services plugin IS applied. It reads
+    // TMessagesProj/google-services.json and generates the Firebase
+    // resources (google_app_id / gcm_defaultSenderId) for app.aligram.
+    // The file is NOT committed to the repo: it comes from the
+    // GOOGLE_SERVICES_JSON GitHub Actions secret (see
+    // .github/workflows/aligram-build.yml), which overwrites the
+    // committed upstream file (nu.gpu.nagram, project nagram-x) at build
+    // time. Crashlytics collection stays forced off in AndroidUtil
+    // (shouldEnableCrashlytics() == false); the getInstance() guard in
+    // ApplicationLoader stays as-is.
     id 'com.google.gms.google-services'
     id 'com.google.firebase.crashlytics'
 }
@@ -10,7 +20,7 @@ plugins {
 def buildTimestamp = System.getenv('BUILD_TIMESTAMP') ?: '0'
 def commitId = System.getenv('COMMIT_ID')
 def verName = "${APP_VERSION_NAME}${commitId?.take(7) ? "-${commitId.take(7)}" : ''}"
-def verCode = 1260
+def verCode = 1263
 
 def officialVer = APP_VERSION_NAME
 def officialCode = APP_VERSION_CODE
@@ -29,15 +39,14 @@ if (base64 != null && !base64.isBlank()) {
     properties.load(project.rootProject.file('local.properties').newDataInputStream())
 }
 
-if (properties != null) {
-    keystorePwd = properties.getProperty('KEYSTORE_PASS')
-    alias = properties.getProperty('ALIAS_NAME')
-    pwd = properties.getProperty('ALIAS_PASS')
-}
-
-keystorePwd = keystorePwd ?: System.getenv('KEYSTORE_PASS')
-alias = alias ?: System.getenv('ALIAS_NAME')
-pwd = pwd ?: System.getenv('ALIAS_PASS')
+// AliGram release signing (2026-11-21): CI secrets KEYSTORE_PASS /
+// ALIAS_NAME / ALIAS_PASS take precedence over LOCAL_PROPERTIES, which
+// may still hold upstream's key passwords. The keystore itself comes
+// from the RELEASE_KEYSTORE_BASE64 CI secret, decoded by the workflow
+// to TMessagesProj/release.keystore (CI workspace only, never committed).
+keystorePwd = System.getenv('KEYSTORE_PASS') ?: (properties != null ? properties.getProperty('KEYSTORE_PASS') : null)
+alias = System.getenv('ALIAS_NAME') ?: (properties != null ? properties.getProperty('ALIAS_NAME') : null)
+pwd = System.getenv('ALIAS_PASS') ?: (properties != null ? properties.getProperty('ALIAS_PASS') : null)
 
 def nativeTarget = System.getenv('NATIVE_TARGET') ?: ''
 
@@ -175,6 +184,30 @@ android {
 
     sourceSets.main.jniLibs.srcDirs = ['./jni/']
 
+    // AliGram: Robolectric unit tests on JDK 17+ (CI uses Temurin 21) need
+    // --add-opens so the sandbox can touch internal OpenJDK APIs. Without
+    // these, every Robolectric test fails in FileDescriptorInterceptor.setInt
+    // (jdk.internal.access.SharedSecrets) with IllegalAccessException
+    // (run 43629996060: 22/22 Robolectric tests failed, 0 production-code
+    // failures — compilation and all 42 pure-JVM tests were green).
+    // List is verbatim from the official Robolectric getting-started guide
+    // (robolectric.org/getting-started, "Running with Java 17 and higher").
+    testOptions {
+        unitTests.all {
+            jvmArgs += [
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "--add-opens=java.base/java.util=ALL-UNNAMED",
+                "--add-opens=java.base/java.io=ALL-UNNAMED",
+                "--add-opens=java.base/java.net=ALL-UNNAMED",
+                "--add-opens=java.base/java.security=ALL-UNNAMED",
+                "--add-opens=java.base/java.text=ALL-UNNAMED",
+                "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+            ]
+        }
+    }
+
     namespace = 'org.telegram.messenger'
 }
 
@@ -268,6 +301,14 @@ dependencies {
     implementation 'org.apache.commons:commons-text:1.15.0'
     // translator from nekogram
     implementation 'app.nekogram.translator:translator:1.6.1'
+    // add for AliGram preservation unit tests (deterministic JVM tests)
+    testImplementation 'junit:junit:4.13.2'
+    // add for AliGram Room integration tests (real Room + Robolectric; Room
+    // version MUST match room-runtime above, Robolectric 4.17 supports
+    // SDK 37 / Gradle 9 / AGP 9 / JDK 21)
+    testImplementation 'androidx.room:room-testing:2.8.4'
+    testImplementation 'org.robolectric:robolectric:4.17'
+    testImplementation 'androidx.test:core:1.6.1'
 
     compileOnly fileTree('libs')
 }

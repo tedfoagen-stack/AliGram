@@ -143,6 +143,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import tw.nekomimi.nekogram.NekoConfig;
 import xyz.nextalone.nagram.NaConfig;
 
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+
 public class ShareAlert extends BottomSheet implements NotificationCenter.NotificationCenterDelegate {
 
     private FrameLayout frameLayout;
@@ -2939,8 +2941,12 @@ public class ShareAlert extends BottomSheet implements NotificationCenter.Notifi
             }
             if (!MessagesController.getInstance(currentAccount).dialogsForward.isEmpty()) {
                 TLRPC.Dialog dialog = MessagesController.getInstance(currentAccount).dialogsForward.get(0);
-                dialogs.add(dialog);
-                dialogsMap.put(dialog.id, dialog);
+                // --- AliGram hidden folders: never offer a hidden dialog
+                // in the share sheet while locked.
+                if (!AliGramHiddenFolders.isDialogHidden(currentAccount, dialog.id)) {
+                    dialogs.add(dialog);
+                    dialogsMap.put(dialog.id, dialog);
+                }
             }
             ArrayList<TLRPC.Dialog> archivedDialogs = new ArrayList<>();
             ArrayList<TLRPC.Dialog> allDialogs = MessagesController.getInstance(currentAccount).getAllDialogs();
@@ -2950,6 +2956,9 @@ public class ShareAlert extends BottomSheet implements NotificationCenter.Notifi
                     continue;
                 }
                 if (dialog.id == selfUserId) {
+                    continue;
+                }
+                if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialog.id)) {
                     continue;
                 }
                 if (!DialogObject.isEncryptedDialog(dialog.id)) {
@@ -3175,6 +3184,22 @@ public class ShareAlert extends BottomSheet implements NotificationCenter.Notifi
             searchAdapterHelper = new SearchAdapterHelper(false) {
                 @Override
                 protected boolean filter(TLObject obj) {
+                    // --- AliGram hidden folders: server search hits for a
+                    // hidden dialog are dropped at merge (the server cannot
+                    // be told about a local hidden set).
+                    if (obj instanceof TLRPC.User) {
+                        if (AliGramHiddenFolders.isDialogHidden(currentAccount, ((TLRPC.User) obj).id)) {
+                            return false;
+                        }
+                    } else if (obj instanceof TLRPC.Chat) {
+                        if (AliGramHiddenFolders.isDialogHidden(currentAccount, -((TLRPC.Chat) obj).id)) {
+                            return false;
+                        }
+                    } else if (obj instanceof TLRPC.EncryptedChat) {
+                        if (AliGramHiddenFolders.isDialogHidden(currentAccount, DialogObject.makeEncryptedDialogId(((TLRPC.EncryptedChat) obj).id))) {
+                            return false;
+                        }
+                    }
                     return !(obj instanceof TLRPC.Chat) || ChatObject.canWriteToChat((TLRPC.Chat) obj);
                 }
             };
@@ -3411,6 +3436,13 @@ public class ShareAlert extends BottomSheet implements NotificationCenter.Notifi
                 }
                 for (int a = 0; a < result.size(); a++) {
                     DialogSearchResult obj = (DialogSearchResult) result.get(a);
+                    // --- AliGram hidden folders: local share-search hits
+                    // for a hidden dialog are dropped here.
+                    if (obj.dialog != null && AliGramHiddenFolders.isDialogHidden(currentAccount, obj.dialog.id)) {
+                        result.remove(a);
+                        a--;
+                        continue;
+                    }
                     if (obj.object instanceof TLRPC.User) {
                         TLRPC.User user = (TLRPC.User) obj.object;
                         MessagesController.getInstance(currentAccount).putUser(user, true);

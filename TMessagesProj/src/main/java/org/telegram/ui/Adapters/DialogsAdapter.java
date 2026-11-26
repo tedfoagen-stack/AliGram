@@ -32,6 +32,7 @@ import androidx.recyclerview.widget.DiffUtil;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager.widget.ViewPager;
 
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.ChatObject;
@@ -1622,6 +1623,31 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
             array = parentFragment.getDialogsArray(currentAccount, dialogsType, folderId, dialogsListFrozen);
             if (array == null) {
                 array = new ArrayList<>();
+            }
+            // --- AliGram hidden folders: display-layer only. Filter a COPY:
+            // getDialogsArray() may return the live list and moveDialogs()
+            // mutates it for pin drag-reorder, so the shared list must
+            // never be filtered in place. Saved Messages (self) and the
+            // Replies pseudo-dialog are never hidden. The grey
+            // reply/forward-source row below is kept: it is only reachable
+            // from inside the source chat itself.
+            if (!AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+                long selfId = UserConfig.getInstance(currentAccount).clientUserId;
+                long keepId = parentFragment.forwardOriginalChannel != 0 ? parentFragment.forwardOriginalChannel : parentFragment.replyMessageAuthor;
+                ArrayList<TLRPC.Dialog> filtered = new ArrayList<>(array.size());
+                for (int i = 0, n = array.size(); i < n; i++) {
+                    TLRPC.Dialog d = array.get(i);
+                    if (d == null) {
+                        continue;
+                    }
+                    if ((d instanceof TLRPC.TL_dialog || d instanceof TLRPC.TL_dialogCommunity)
+                            && d.id != keepId && d.id != selfId && !UserObject.isReplyUser(d.id)
+                            && AliGramHiddenFolders.isDialogHidden(currentAccount, d.id)) {
+                        continue;
+                    }
+                    filtered.add(d);
+                }
+                array = filtered;
             }
         }
 

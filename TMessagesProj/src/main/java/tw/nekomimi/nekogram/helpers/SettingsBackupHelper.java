@@ -13,6 +13,7 @@ import android.widget.LinearLayout;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.radolyn.ayugram.aligram.AliGramExportKeys;
 import com.radolyn.ayugram.messages.AyuSavePreferences;
 import com.radolyn.ayugram.utils.AyuGhostPreferences;
 
@@ -65,7 +66,15 @@ public final class SettingsBackupHelper {
         userconfig.add("passcodeHash");
         userconfig.add("autoLockIn");
         userconfig.add("useFingerprint");
-        spToJSON("userconfing", configJson, userconfig::contains, isCloud);
+        // AliGram: per-chat Preserve Media opt-ins + activation stamps and
+        // the hidden-folder code hash + hidden list live in userconfing too
+        // (per-account UserConfig prefs) and must survive export/import, so
+        // the whitelist accepts them by prefix alongside the fixed list.
+        // Import needs no change: userconfing keys in the JSON are written
+        // back unconditionally (only nkmrcfg is filtered on import).
+        spToJSON("userconfing", configJson,
+                key -> userconfig.contains(key) || AliGramExportKeys.isAliGramUserconfigKey(key),
+                isCloud);
 
         ArrayList<String> mainconfig = new ArrayList<>();
         mainconfig.add("saveToGallery");
@@ -146,7 +155,8 @@ public final class SettingsBackupHelper {
             if ("nkmrcfg".equals(sp) && isDeviceSpecificPushKey(key)) {
                 continue;
             }
-            if (!includeApiKeys && (key.endsWith("Key") || key.contains("Token") || key.contains("AccountID"))) {
+            if (!includeApiKeys && !AliGramExportKeys.isAliGramUserconfigKey(key)
+                    && (key.endsWith("Key") || key.contains("Token") || key.contains("AccountID"))) {
                 continue;
             }
             if (filter != null && !filter.apply(key)) {

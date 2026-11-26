@@ -1,0 +1,960 @@
+package com.radolyn.ayugram.aligram;
+
+import android.content.SharedPreferences;
+
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.UserConfig;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+
+/**
+ * AliGram — hidden folders: core state machine (step 1).
+ *
+ * <p>Display-layer hiding only. This class owns the persistent hidden-folder
+ * flags + the unlock code hash, the in-memory lock state, the cached set of
+ * dialog ids that belong to hidden filters, and the 1-hour auto-lock timer.
+ * It performs NO UI work and touches NO dialog list, NO sync path, NO
+ * preservation ingest path and NO notification path itself — the UI /
+ * MessagesController / NotificationsController layers call the predicates
+ * here at their own filter sites (see HIDDEN-FOLDER-INVESTIGATION.md §3).
+ *
+ * <h2>Storage</h2>
+ * Per-account {@link SharedPreferences} via
+ * {@code UserConfig.getInstance(account).getPreferences()} — the same prefs
+ * file and pattern as {@code AliGramPreservation} (per-dialog keys
+ * {@code "ayuPreserveMedia_" + dialogId}). Key names are deliberately
+ * innocuous: they contain NONE of the words {@code hidden} / {@code hide} /
+ * {@code lock} / {@code code}, and the unlock code is NEVER stored in
+ * plaintext — only a salted SHA-256 hash + salt (see {@link #hashWithSalt}).
+ * There is no recovery path by design: forgetting the code loses the hidden
+ * folders (clearing app data destroys the hash AND the flags together).
+ *
+ * <h2>Code hash</h2>
+ * Salted SHA-256 copying the {@code SharedConfig.checkPasscode}
+ * construction exactly ({@code SharedConfig.java:863-893}): 16-byte random
+ * salt, {@code bytes = salt[16] + codeUTF8 + salt[16]}, SHA-256, hex via
+ * {@code bytesToHex}. The legacy unsalted-MD5 branch is NEVER used. The hash
+ * here is computed with plain {@code java.security.MessageDigest} (byte for
+ * byte the same construction as {@code Utilities.computeSHA256} /
+ * {@code Utilities.bytesToHex}) so this class stays unit-testable on a plain
+ * JVM without Android. Note the inherent limit, same as the Telegram
+ * passcode: a 4–6 digit code has at most 10^6 combinations, so a rooted
+ * device that can read prefs can brute-force it offline; the salt only stops
+ * rainbow tables.
+ *
+ * <h2>Lock state</h2>
+ * {@code unlocked} + {@code unlockStartedAt} are MEMORY ONLY, default
+ * locked. Process death ⇒ locked. Unlock schedules an auto-lock after
+ * {@link #AUTO_LOCK_MS}; manual {@link #lock(int)} and background lock both
+ * cancel the timer.
+ *
+ * <h2>Search-box contract (read before wiring the UI)</h2>
+ * {@code DialogsActivity.onTextChanged} fires per keystroke, so a 4-digit
+ * prefix of a 5–6 digit code is indistinguishable from a complete 4-digit
+ * code at the moment it is typed. Therefore:
+ * <ul>
+ *   <li>{@link #handleSearchText(int, String)} handles ONLY the lock toggle:
+ *       code set + text matching {@code ^\d{4,6}$} + hash match ⇒ toggle
+ *       lock/unlock and return {@code true} (UI clears the field). A
+ *       4-digit prefix of a longer code can never hash-match, so no
+ *       premature toggle is possible. Wrong codes fall through to normal
+ *       search (no lock change).</li>
+ *   <li>{@link #handleSearchText(int, String)} NEVER commits a setup.
+ *       Committing {@code ##1234} inside it would commit the prefix of
+ *       {@code ##12345}. Setup is a separate two-step flow:
+ *       {@link #isSetupCandidate(String)} (pattern {@code ^##\d{4,6}$}) →
+ *       UI debounces 1000 ms of no further keystroke →
+ *       {@link #commitSetup(int, String)}. While a setup candidate is on
+ *       screen the UI must not run a hashtag search for it.</li>
+ *   <li>{@link #onSetupTextChanged(int, String)} implements that debounce
+ *       for the UI on top of the injectable {@link Scheduler}: each new
+ *       keystroke cancels the pending commit and schedules a fresh one
+ *       1000 ms out, so only the final digits are ever committed.</li>
+ * </ul>
+ *
+ * <h2>Hidden-dialog cache</h2>
+ * Membership is defined as: dialog ∈ any hidden filter (server filter
+ * {@code id}). The UI/MessagesController layer supplies membership via
+ * {@link #rebuildHiddenDialogCache(int, Function)} (built from
+ * {@code DialogFilter.includesDialog} / {@code sortDialogs} data) or
+ * registers a provider once with {@link #setDialogsProvider(int, Function)}.
+ * The cache is rebuilt on lock/unlock, hide/unhide, filter changes and
+ * prune whenever a provider is registered; without a provider the cache is
+ * cleared (stale) and {@link #isDialogHidden(int, long)} safely returns
+ * {@code false}. The cache is a plain {@code HashSet} lookup — never call
+ * {@code includesDialog} per dialog per sort.
+ *
+ * <h2>Testability</h2>
+ * Prefs and the timer go through the {@link PrefsStore}/{@link Scheduler}
+ * interfaces. Production uses the Android implementations; JVM tests inject
+ * a {@link Map}-backed store and a fake scheduler via
+ * {@link #setPrefsProviderForTest(PrefsProvider)},
+ * {@link #setSchedulerForTest(Scheduler)} and {@link #resetForTest()}.
+ * Nothing in the tested paths calls Android.
+ */
+public final class AliGramHiddenFolders {
+
+    private AliGramHiddenFolders() {
+    }
+
+    /** Auto-lock delay after unlock: 1 hour (Req 7). */
+    public static final long AUTO_LOCK_MS = 3600000L;
+
+    /** Quiet window with no further keystroke before a ## setup commits. */
+    public static final long SETUP_DEBOUNCE_MS = 1000L;
+
+    private static final int CODE_MIN_LEN = 4;
+    private static final int CODE_MAX_LEN = 6;
+    private static final int SALT_BYTES = 16;
+
+    // --- Persistent keys: innocuous, no hidden/hide/lock/code substring ---
+    // Strings owned by AliGramExportKeys (single source of truth — the
+    // settings-export filter reads them from there, so they must not drift).
+    /** Per-filter hidden flag, suffixed with the SERVER filter id. */
+    static final String KEY_OPT_PREFIX = AliGramExportKeys.HIDDEN_FOLDER_OPT_PREFIX;
+    /** Salted SHA-256 hex of the code. Never the plaintext code. */
+    static final String KEY_HASH = AliGramExportKeys.HIDDEN_FOLDER_KEY_HASH;
+    /** 16-byte salt, hex-encoded. */
+    static final String KEY_SALT = AliGramExportKeys.HIDDEN_FOLDER_KEY_SALT;
+
+    private static final Pattern CODE_PATTERN = Pattern.compile("^\\d{4,6}$");
+    private static final Pattern SETUP_PATTERN = Pattern.compile("^##\\d{4,6}$");
+
+    // ==================================================================
+    // Prefs + scheduler abstractions (injected in tests, Android in prod)
+    // ==================================================================
+
+    /** Minimal SharedPreferences surface this class needs. */
+    public interface PrefsStore {
+        boolean getBoolean(String key, boolean def);
+        void putBoolean(String key, boolean value);
+        String getString(String key, String def);
+        void putString(String key, String value);
+        void remove(String key);
+        Map<String, ?> getAll();
+    }
+
+    /** Supplies the per-account store. Production: UserConfig prefs. */
+    public interface PrefsProvider {
+        PrefsStore prefsFor(int account);
+    }
+
+    /** Delayed-post surface (production: AndroidUtilities Handler). */
+    public interface Scheduler {
+        void postDelayed(Runnable runnable, long delayMs);
+        void cancel(Runnable runnable);
+    }
+
+    /** In-memory {@link PrefsStore} for JVM tests (and for ad-hoc use). */
+    public static PrefsStore newInMemoryStore() {
+        return new MapPrefsStore();
+    }
+
+    private static final class MapPrefsStore implements PrefsStore {
+        private final Map<String, Object> map = new HashMap<>();
+
+        @Override
+        public synchronized boolean getBoolean(String key, boolean def) {
+            Object v = map.get(key);
+            return v instanceof Boolean ? (Boolean) v : def;
+        }
+
+        @Override
+        public synchronized void putBoolean(String key, boolean value) {
+            map.put(key, value);
+        }
+
+        @Override
+        public synchronized String getString(String key, String def) {
+            Object v = map.get(key);
+            return v instanceof String ? (String) v : def;
+        }
+
+        @Override
+        public synchronized void putString(String key, String value) {
+            map.put(key, value);
+        }
+
+        @Override
+        public synchronized void remove(String key) {
+            map.remove(key);
+        }
+
+        @Override
+        public synchronized Map<String, ?> getAll() {
+            return new HashMap<>(map);
+        }
+    }
+
+    /** {@link PrefsStore} adapter over real Android SharedPreferences. */
+    private static final class SharedPrefsStore implements PrefsStore {
+        private final SharedPreferences prefs;
+
+        SharedPrefsStore(SharedPreferences prefs) {
+            this.prefs = prefs;
+        }
+
+        @Override
+        public boolean getBoolean(String key, boolean def) {
+            try {
+                return prefs.getBoolean(key, def);
+            } catch (Throwable ignored) {
+                return def;
+            }
+        }
+
+        @Override
+        public void putBoolean(String key, boolean value) {
+            try {
+                prefs.edit().putBoolean(key, value).apply();
+            } catch (Throwable ignored) {
+            }
+        }
+
+        @Override
+        public String getString(String key, String def) {
+            try {
+                return prefs.getString(key, def);
+            } catch (Throwable ignored) {
+                return def;
+            }
+        }
+
+        @Override
+        public void putString(String key, String value) {
+            try {
+                prefs.edit().putString(key, value).apply();
+            } catch (Throwable ignored) {
+            }
+        }
+
+        @Override
+        public void remove(String key) {
+            try {
+                prefs.edit().remove(key).apply();
+            } catch (Throwable ignored) {
+            }
+        }
+
+        @Override
+        public Map<String, ?> getAll() {
+            try {
+                Map<String, ?> all = prefs.getAll();
+                return all != null ? new HashMap<>(all) : new HashMap<>();
+            } catch (Throwable ignored) {
+                return new HashMap<>();
+            }
+        }
+    }
+
+    private static final PrefsProvider DEFAULT_PREFS_PROVIDER =
+            account -> new SharedPrefsStore(UserConfig.getInstance(account).getPreferences());
+
+    private static final Scheduler DEFAULT_SCHEDULER = new Scheduler() {
+        @Override
+        public void postDelayed(Runnable runnable, long delayMs) {
+            AndroidUtilities.runOnUIThread(runnable, delayMs);
+        }
+
+        @Override
+        public void cancel(Runnable runnable) {
+            AndroidUtilities.cancelRunOnUIThread(runnable);
+        }
+    };
+
+    private static volatile PrefsProvider prefsProvider = DEFAULT_PREFS_PROVIDER;
+    private static volatile Scheduler scheduler = DEFAULT_SCHEDULER;
+
+    /** Test hook: replace the prefs provider (null restores the default). */
+    public static void setPrefsProviderForTest(PrefsProvider provider) {
+        prefsProvider = provider != null ? provider : DEFAULT_PREFS_PROVIDER;
+    }
+
+    /** Test hook: replace the scheduler (null restores the default). */
+    public static void setSchedulerForTest(Scheduler testScheduler) {
+        scheduler = testScheduler != null ? testScheduler : DEFAULT_SCHEDULER;
+    }
+
+    /**
+     * Test hook: clear all per-account in-memory state and restore the
+     * default prefs provider + scheduler. Call in {@code @Before}.
+     */
+    public static void resetForTest() {
+        STATES.clear();
+        prefsProvider = DEFAULT_PREFS_PROVIDER;
+        scheduler = DEFAULT_SCHEDULER;
+    }
+
+    private static PrefsStore prefsFor(int account) {
+        return prefsProvider.prefsFor(account);
+    }
+
+    // ==================================================================
+    // Per-account in-memory state (never persisted)
+    // ==================================================================
+
+    private static final class AccountState {
+        /** True while unlocked; default false (locked), also after restart. */
+        volatile boolean unlocked;
+        /** {@link System#currentTimeMillis()} at unlock; 0 when locked. */
+        volatile long unlockStartedAt;
+        /** Dialog ids belonging to any hidden filter (rebuilt, see above). */
+        final Set<Long> hiddenDialogCache = new HashSet<>();
+        /** Membership supplier registered by the UI layer (may be null). */
+        volatile Function<Integer, Collection<Long>> dialogsProvider;
+        /** Pending auto-lock runnable (null when locked / no timer). */
+        Runnable autoLockRunnable;
+        /** Pending debounced setup commit (null when none). */
+        Runnable pendingSetupRunnable;
+        /** Digits the pending setup commit will store. */
+        String pendingSetupDigits;
+    }
+
+    private static final ConcurrentHashMap<Integer, AccountState> STATES = new ConcurrentHashMap<>();
+
+    private static AccountState stateFor(int account) {
+        return STATES.computeIfAbsent(account, k -> new AccountState());
+    }
+
+    // ==================================================================
+    // Code hash — SharedConfig.checkPasscode construction, byte for byte
+    // ==================================================================
+
+    private static byte[] sha256(byte[] input) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(input);
+        } catch (Throwable ignored) {
+            return new byte[32];
+        }
+    }
+
+    private static final char[] HEX_ARRAY = "0123456789abcdef".toCharArray();
+
+    static String bytesToHex(byte[] bytes) {
+        if (bytes == null) {
+            return "";
+        }
+        char[] hexChars = new char[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars);
+    }
+
+    static byte[] hexToBytes(String hex) {
+        if (hex == null) {
+            return null;
+        }
+        int len = hex.length();
+        if ((len & 1) != 0) {
+            return null;
+        }
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            int hi = Character.digit(hex.charAt(i), 16);
+            int lo = Character.digit(hex.charAt(i + 1), 16);
+            if (hi < 0 || lo < 0) {
+                return null;
+            }
+            data[i / 2] = (byte) ((hi << 4) + lo);
+        }
+        return data;
+    }
+
+    /**
+     * Salted hash, byte-for-byte the {@code SharedConfig.checkPasscode}
+     * construction ({@code SharedConfig.java:863-893}): 16-byte salt,
+     * {@code bytes = salt[16] + codeUTF8 + salt[16]}, SHA-256, hex.
+     * Never the legacy unsalted-MD5 branch. Package-private for tests.
+     */
+    static String hashWithSalt(String code, byte[] salt) {
+        byte[] codeBytes = code.getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = new byte[32 + codeBytes.length];
+        System.arraycopy(salt, 0, bytes, 0, 16);
+        System.arraycopy(codeBytes, 0, bytes, 16, codeBytes.length);
+        System.arraycopy(salt, 0, bytes, codeBytes.length + 16, 16);
+        return bytesToHex(sha256(bytes));
+    }
+
+    private static boolean isValidCode(String code) {
+        return code != null && CODE_PATTERN.matcher(code).matches();
+    }
+
+    // ==================================================================
+    // Code setup / matching (hash only, never plaintext)
+    // ==================================================================
+
+    /** True once a code hash has been stored for this account. */
+    public static boolean hasCodeSet(int account) {
+        try {
+            String hash = prefsFor(account).getString(KEY_HASH, null);
+            return hash != null && !hash.isEmpty();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Stores the code (salt + salted hash only). Only when no code is set
+     * yet and the code is 4–6 digits; returns {@code false} otherwise.
+     * There is no re-setup / recovery path by design.
+     */
+    public static boolean setupCode(int account, String code) {
+        if (!isValidCode(code)) {
+            return false;
+        }
+        try {
+            PrefsStore prefs = prefsFor(account);
+            if (prefs.getString(KEY_HASH, null) != null) {
+                return false;
+            }
+            byte[] salt = new byte[SALT_BYTES];
+            // Same source of randomness as SharedConfig (Utilities.random is
+            // a SecureRandom); plain SecureRandom here keeps this pure-Java.
+            new SecureRandom().nextBytes(salt);
+            prefs.putString(KEY_SALT, bytesToHex(salt));
+            prefs.putString(KEY_HASH, hashWithSalt(code, salt));
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Hash-equality match only; never a plaintext comparison. */
+    public static boolean matchesCode(int account, String code) {
+        if (!isValidCode(code)) {
+            return false;
+        }
+        try {
+            PrefsStore prefs = prefsFor(account);
+            String storedHash = prefs.getString(KEY_HASH, null);
+            String saltHex = prefs.getString(KEY_SALT, null);
+            if (storedHash == null || saltHex == null) {
+                return false;
+            }
+            byte[] salt = hexToBytes(saltHex);
+            if (salt == null || salt.length != SALT_BYTES) {
+                return false;
+            }
+            String computed = hashWithSalt(code, salt);
+            return MessageDigest.isEqual(
+                    storedHash.getBytes(StandardCharsets.UTF_8),
+                    computed.getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    // ==================================================================
+    // Lock / unlock + auto-lock timer (memory only)
+    // ==================================================================
+
+    /** True while this account is unlocked (in-memory only). */
+    public static boolean isUnlocked(int account) {
+        return stateFor(account).unlocked;
+    }
+
+    /**
+     * Unlocks: sets the in-memory flag, records the unlock time and
+     * schedules auto-lock after {@link #AUTO_LOCK_MS}. Any pending timer
+     * is replaced. No state is persisted.
+     */
+    public static void unlock(int account) {
+        AccountState st = stateFor(account);
+        synchronized (st) {
+            if (st.autoLockRunnable != null) {
+                scheduler.cancel(st.autoLockRunnable);
+                st.autoLockRunnable = null;
+            }
+            st.unlocked = true;
+            st.unlockStartedAt = System.currentTimeMillis();
+            final int acc = account;
+            Runnable autoLock = () -> lock(acc);
+            st.autoLockRunnable = autoLock;
+            scheduler.postDelayed(autoLock, AUTO_LOCK_MS);
+            rebuildCacheLocked(st, account);
+        }
+    }
+
+    /**
+     * Locks: cancels the auto-lock timer, clears the in-memory flag and
+     * timestamp. A no-op when already locked. No state is persisted.
+     */
+    public static void lock(int account) {
+        AccountState st = stateFor(account);
+        synchronized (st) {
+            if (!st.unlocked && st.autoLockRunnable == null) {
+                st.unlockStartedAt = 0;
+                return;
+            }
+            if (st.autoLockRunnable != null) {
+                scheduler.cancel(st.autoLockRunnable);
+                st.autoLockRunnable = null;
+            }
+            st.unlocked = false;
+            st.unlockStartedAt = 0;
+            rebuildCacheLocked(st, account);
+        }
+    }
+
+    /** {@link System#currentTimeMillis()} recorded at unlock; 0 when locked. */
+    public static long getUnlockStartedAt(int account) {
+        return stateFor(account).unlockStartedAt;
+    }
+
+    /** Test hook: override the recorded unlock time (fake clock). */
+    public static void setUnlockStartedAtForTest(int account, long value) {
+        stateFor(account).unlockStartedAt = value;
+    }
+
+    /**
+     * Pure expiry check on the stored unlock time: expired at
+     * {@code unlockStartedAt + AUTO_LOCK_MS}, NOT at +3599s.
+     * Returns {@code false} when not unlocked (nothing to expire).
+     */
+    public static boolean isAutoLockExpired(int account, long nowMs) {
+        AccountState st = stateFor(account);
+        if (!st.unlocked) {
+            return false;
+        }
+        return nowMs - st.unlockStartedAt >= AUTO_LOCK_MS;
+    }
+
+    // ==================================================================
+    // Search-box intercept (DialogsActivity.onTextChanged calls this)
+    // ==================================================================
+
+    /**
+     * True iff the text is a setup candidate: {@code ^##\d{4,6}$}.
+     * Pattern only — the caller must also check {@code !hasCodeSet(account)}
+     * (a code that is already set ignores {@code ##…} input). This method
+     * never commits anything.
+     */
+    public static boolean isSetupCandidate(String text) {
+        return text != null && SETUP_PATTERN.matcher(text).matches();
+    }
+
+    /**
+     * The debounced setup commit. Accepts {@code "1234"} or
+     * {@code "##1234"}; delegates to {@link #setupCode(int, String)} so it
+     * only succeeds when no code is set and the digits are 4–6 long.
+     * Called by the UI layer after {@link #SETUP_DEBOUNCE_MS} of quiet, or
+     * by {@link #onSetupTextChanged(int, String)} when its timer fires.
+     */
+    public static boolean commitSetup(int account, String digits) {
+        if (digits == null) {
+            return false;
+        }
+        String d = digits.startsWith("##") ? digits.substring(2) : digits;
+        return setupCode(account, d);
+    }
+
+    /**
+     * Debounced setup entry point for the UI layer. Call on every
+     * {@code onTextChanged} with the current field text: when the text is a
+     * setup candidate and no code is set yet, any pending commit is
+     * cancelled and a fresh commit of the latest digits is scheduled
+     * {@link #SETUP_DEBOUNCE_MS} out — so rapid typing
+     * {@code ##123 → ##1234 → ##12345} commits only the final value, never
+     * the intermediate {@code ##1234}. Non-candidates cancel any pending
+     * commit. Never commits synchronously.
+     */
+    public static void onSetupTextChanged(int account, String text) {
+        AccountState st = stateFor(account);
+        synchronized (st) {
+            if (st.pendingSetupRunnable != null) {
+                scheduler.cancel(st.pendingSetupRunnable);
+                st.pendingSetupRunnable = null;
+                st.pendingSetupDigits = null;
+            }
+            if (text == null || hasCodeSet(account) || !isSetupCandidate(text)) {
+                return;
+            }
+            final String digits = text.substring(2);
+            final int acc = account;
+            Runnable commit = () -> {
+                synchronized (st) {
+                    st.pendingSetupRunnable = null;
+                    st.pendingSetupDigits = null;
+                }
+                commitSetup(acc, digits);
+            };
+            st.pendingSetupRunnable = commit;
+            st.pendingSetupDigits = digits;
+            scheduler.postDelayed(commit, SETUP_DEBOUNCE_MS);
+        }
+    }
+
+    /**
+     * Search-intercept entry point. The UI layer calls this from
+     * {@code DialogsActivity.onTextChanged} before the search runs; when it
+     * returns {@code true} the UI clears the field and returns early (no
+     * server query, no recent-search row, no toast).
+     *
+     * <p>Handles ONLY the lock toggle: a code must be set, the text must
+     * match {@code ^\d{4,6}$} AND hash-match the stored code; then the lock
+     * toggles (locked → unlock, unlocked → lock). A wrong code, a wrong
+     * length, or a 4-digit prefix of a longer code falls through to normal
+     * search and never changes the lock state.
+     *
+     * <p>Deliberately does NOT commit setup: with no stored hash to compare
+     * against, {@code ##1234} typed on the way to {@code ##12345} would
+     * commit the prefix. Setup goes through
+     * {@link #isSetupCandidate(String)} → debounce →
+     * {@link #commitSetup(int, String)} (see {@link #onSetupTextChanged}).
+     */
+    public static boolean handleSearchText(int account, String text) {
+        if (text == null || !hasCodeSet(account)) {
+            return false;
+        }
+        if (!CODE_PATTERN.matcher(text).matches() || !matchesCode(account, text)) {
+            return false;
+        }
+        if (isUnlocked(account)) {
+            lock(account);
+        } else {
+            unlock(account);
+        }
+        return true;
+    }
+
+    /**
+     * Whether the search UI should be dismissed after intercepting this
+     * text — auto-return to the main dialogs interface. ONLY the exact-code
+     * lock toggle dismisses: the toggle fires solely on a 4–6 digit exact
+     * code match ({@link #handleSearchText} returning true), so
+     * {@code toggleHandled == true} with a code-shaped text is the one
+     * dismiss case. The {@code ##} first-time setup path never dismisses
+     * (its commit is debounced 1000 ms and the field is cleared later by
+     * the setup-clear runnable), and ordinary search text never dismisses.
+     */
+    public static boolean shouldDismissSearch(String text, boolean toggleHandled) {
+        return toggleHandled && text != null && CODE_PATTERN.matcher(text).matches();
+    }
+
+    /**
+     * Which UI action collapses the search after intercepting this text.
+     *
+     * <p>The exact-code toggle must collapse the search through the
+     * FragmentSearchField watcher ({@code COLLAPSE_SEARCH_FIELD}) — the
+     * same path the search field's X button uses
+     * ({@code fragmentSearchFieldWatcher.toggleSearch(false)} →
+     * {@code onSearchCollapse()} → {@code showSearch(false, ...)}).
+     * It must NOT use {@code DialogsActivity.closeSearching()}: that
+     * helper only acts when {@code actionBar.isSearchFieldVisible()},
+     * and that flag is never set for the FragmentSearchField search
+     * (the ActionBar search item is hidden, its click listener replaced,
+     * zero {@code openSearch()} calls), so closeSearching() is a
+     * guaranteed no-op in exactly this flow — the 1262 bug (unlock
+     * worked, search stayed open showing "no results found"). There is
+     * deliberately no CLOSE_SEARCHING value: the no-op mechanism cannot
+     * be expressed, so the regression cannot be reintroduced through
+     * this decision.
+     */
+    public enum SearchDismissAction {
+        /** Do not dismiss search (ordinary text, ## setup, no toggle). */
+        NONE,
+        /** Collapse via the FragmentSearchField watcher. */
+        COLLAPSE_SEARCH_FIELD
+    }
+
+    public static SearchDismissAction dismissAction(String text, boolean toggleHandled) {
+        return shouldDismissSearch(text, toggleHandled) ? SearchDismissAction.COLLAPSE_SEARCH_FIELD : SearchDismissAction.NONE;
+    }
+
+    // ==================================================================
+    // Hidden filters (persistent, keyed by SERVER filter id)
+    // ==================================================================
+
+    /**
+     * True iff the filter with this server id is hidden. The default filter
+     * ({@code id == 0}, "All Chats") can never be hidden.
+     */
+    public static boolean isFilterHidden(int account, int filterServerId) {
+        if (filterServerId == 0) {
+            return false;
+        }
+        try {
+            return prefsFor(account).getBoolean(KEY_OPT_PREFIX + filterServerId, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Sets / clears the persistent hidden flag for a server filter id.
+     * The default filter ({@code id == 0}) is ignored. Flags are keyed by
+     * the SERVER id (stable across sync/reinstall), never by localId.
+     * Rebuilds the hidden-dialog cache (via the registered provider, if any).
+     */
+    public static void setFilterHidden(int account, int filterServerId, boolean hidden) {
+        if (filterServerId == 0) {
+            return;
+        }
+        try {
+            PrefsStore prefs = prefsFor(account);
+            if (hidden) {
+                prefs.putBoolean(KEY_OPT_PREFIX + filterServerId, true);
+            } else {
+                prefs.remove(KEY_OPT_PREFIX + filterServerId);
+            }
+        } catch (Throwable ignored) {
+        }
+        rebuildCache(account);
+    }
+
+    /** Server filter ids currently flagged hidden (id 0 never included). */
+    public static Set<Integer> hiddenFilterIds(int account) {
+        Set<Integer> out = new HashSet<>();
+        try {
+            for (Map.Entry<String, ?> entry : prefsFor(account).getAll().entrySet()) {
+                String key = entry.getKey();
+                if (key.startsWith(KEY_OPT_PREFIX) && Boolean.TRUE.equals(entry.getValue())) {
+                    try {
+                        int id = Integer.parseInt(key.substring(KEY_OPT_PREFIX.length()));
+                        if (id != 0) {
+                            out.add(id);
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /**
+     * Prunes hidden flags whose server filter id no longer exists (e.g. a
+     * server-shared chatlist folder deleted/recreated under a new id).
+     * Pass the current server ids from {@code getDialogFilters()}.
+     */
+    public static void pruneHiddenFilters(int account, Collection<Integer> existingServerIds) {
+        Set<Integer> keep = existingServerIds == null
+                ? Collections.emptySet() : new HashSet<>(existingServerIds);
+        try {
+            PrefsStore prefs = prefsFor(account);
+            List<String> remove = new ArrayList<>();
+            for (String key : prefs.getAll().keySet()) {
+                if (!key.startsWith(KEY_OPT_PREFIX)) {
+                    continue;
+                }
+                try {
+                    int id = Integer.parseInt(key.substring(KEY_OPT_PREFIX.length()));
+                    if (!keep.contains(id)) {
+                        remove.add(key);
+                    }
+                } catch (NumberFormatException ignored) {
+                    remove.add(key);
+                }
+            }
+            for (String key : remove) {
+                prefs.remove(key);
+            }
+        } catch (Throwable ignored) {
+        }
+        rebuildCache(account);
+    }
+
+    // ==================================================================
+    // Hidden-dialog cache + membership predicates
+    // ==================================================================
+
+    /**
+     * Registers the membership supplier and rebuilds the cache. The
+     * supplier maps a hidden server filter id to the dialog ids in that
+     * filter (built by the UI/MessagesController layer from
+     * {@code DialogFilter.includesDialog} / {@code sortDialogs} data).
+     */
+    public static void rebuildHiddenDialogCache(int account,
+            Function<Integer, Collection<Long>> dialogsForFilter) {
+        AccountState st = stateFor(account);
+        synchronized (st) {
+            if (dialogsForFilter != null) {
+                st.dialogsProvider = dialogsForFilter;
+            }
+            rebuildCacheLocked(st, account);
+        }
+    }
+
+    /**
+     * Registers the membership supplier (same as passing it to
+     * {@link #rebuildHiddenDialogCache(int, Function)}); rebuilds now.
+     * With a provider registered, lock/unlock, hide/unhide and prune
+     * rebuild the cache automatically.
+     */
+    public static void setDialogsProvider(int account,
+            Function<Integer, Collection<Long>> dialogsForFilter) {
+        rebuildHiddenDialogCache(account, dialogsForFilter);
+    }
+
+    private static void rebuildCache(int account) {
+        AccountState st = stateFor(account);
+        synchronized (st) {
+            rebuildCacheLocked(st, account);
+        }
+    }
+
+    private static void rebuildCacheLocked(AccountState st, int account) {
+        st.hiddenDialogCache.clear();
+        Function<Integer, Collection<Long>> fn = st.dialogsProvider;
+        if (fn == null) {
+            return;
+        }
+        for (int filterId : hiddenFilterIds(account)) {
+            try {
+                Collection<Long> dialogs = fn.apply(filterId);
+                if (dialogs != null) {
+                    st.hiddenDialogCache.addAll(dialogs);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * The choke-point predicate (Req 8): {@code locked && dialog ∈ ⋃ hidden
+     * filters}, evaluated against the cache. Returns {@code false} when
+     * unlocked, when no provider/cache has been built, or for unknown ids.
+     */
+    public static boolean isDialogHidden(int account, long dialogId) {
+        return isDialogHiddenCached(account, dialogId);
+    }
+
+    /** Same as {@link #isDialogHidden(int, long)} — cache-backed lookup. */
+    public static boolean isDialogHiddenCached(int account, long dialogId) {
+        AccountState st = stateFor(account);
+        if (st.unlocked) {
+            return false;
+        }
+        synchronized (st) {
+            return st.hiddenDialogCache.contains(dialogId);
+        }
+    }
+
+    /**
+     * Pure membership predicate for tests and for call sites that already
+     * know membership: hidden iff locked AND in a hidden filter — even when
+     * the dialog is ALSO in a visible filter (dominance). The visible-filter
+     * parameter is accepted to make that dominance explicit at call sites.
+     */
+    public static boolean isHiddenByMembership(boolean locked, boolean inHiddenFilter,
+            boolean inVisibleFilter) {
+        return locked && inHiddenFilter;
+    }
+
+    // ==================================================================
+    // Pure helpers for the UI layers (counters / stats / search / notify)
+    // ==================================================================
+
+    /**
+     * Unread-count subtraction for {@code getTabCounter} / badge sites:
+     * total unread minus the unread of hidden dialogs, clamped at 0.
+     * {@code unreadByDialog} maps dialog id → its unread count.
+     */
+    public static long excludeHiddenUnread(long totalUnread,
+            Map<Long, Integer> unreadByDialog, Set<Long> hiddenDialogIds) {
+        if (totalUnread <= 0 || unreadByDialog == null || hiddenDialogIds == null) {
+            return Math.max(0, totalUnread);
+        }
+        long hidden = 0;
+        for (Long id : hiddenDialogIds) {
+            Integer u = unreadByDialog.get(id);
+            if (u != null) {
+                hidden += u;
+            }
+        }
+        return Math.max(0, totalUnread - hidden);
+    }
+
+    /**
+     * Filtered "AliGram preserved media" aggregate stats (settings row):
+     * {@code totalStats} is {@code [enabledChats, blobs, bytes]} per
+     * {@code AliGramPreservation.getPreservedStats}; {@code perDialogStats}
+     * maps hidden dialog id → its per-dialog stats in the SAME layout
+     * {@code [1 if opted-in, blobs, bytes]} (the UI layer maps
+     * {@code getPreservedStatsForDialog}'s {@code {refs, blobs, bytes}} to
+     * this layout — refs are not the enabled-chat count). Returns
+     * total-minus-hidden, each component clamped at 0. Dialogs in
+     * {@code hiddenDialogIds} with no per-dialog entry subtract nothing.
+     * Note: blobs/bytes shared between dialogs are counted once in the
+     * total (dedup by blob id) — callers should pass per-dialog figures
+     * computed with the same dedup awareness when exactness matters.
+     */
+    public static long[] filterPreservedStats(long[] totalStats,
+            Map<Long, long[]> perDialogStats, Set<Long> hiddenDialogIds) {
+        long[] out = new long[]{0, 0, 0};
+        if (totalStats != null) {
+            for (int i = 0; i < 3 && i < totalStats.length; i++) {
+                out[i] = totalStats[i];
+            }
+        }
+        if (perDialogStats == null || hiddenDialogIds == null) {
+            return out;
+        }
+        for (Long id : hiddenDialogIds) {
+            long[] s = perDialogStats.get(id);
+            if (s == null) {
+                continue;
+            }
+            for (int i = 0; i < 3 && i < s.length; i++) {
+                out[i] -= s[i];
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            if (out[i] < 0) {
+                out[i] = 0;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Notification gate (Req 8 / §E): suppress a notification (incl. the
+     * generic fallback — there is none in this path) only when locked AND
+     * the dialog is hidden. Same predicate for message and story pushes.
+     */
+    public static boolean shouldSuppressNotification(boolean locked, boolean dialogHidden) {
+        return locked && dialogHidden;
+    }
+
+    /**
+     * Search/recent/share filter: returns a new set with every id for which
+     * {@code isHidden} is true removed, preserving input order. Null input
+     * yields an empty set; a null predicate keeps everything. Callers must
+     * make {@code isHidden} return {@code false} for dialogs that are
+     * never hidden (Saved Messages pseudo-dialog, Replies {@code 708513}).
+     */
+    public static Set<Long> filterHiddenIds(Collection<Long> ids, Predicate<Long> isHidden) {
+        Set<Long> out = new LinkedHashSet<>();
+        if (ids == null) {
+            return out;
+        }
+        for (Long id : ids) {
+            if (id == null) {
+                continue;
+            }
+            if (isHidden == null || !isHidden.test(id)) {
+                out.add(id);
+            }
+        }
+        return out;
+    }
+}

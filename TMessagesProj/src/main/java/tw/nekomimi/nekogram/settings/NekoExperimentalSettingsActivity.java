@@ -19,6 +19,8 @@ import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.radolyn.ayugram.AyuConstants;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
+import com.radolyn.ayugram.aligram.AliGramPreservation;
 import com.radolyn.ayugram.database.AyuData;
 import com.radolyn.ayugram.messages.AyuMessagesController;
 
@@ -52,7 +54,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import kotlin.Unit;
 import tw.nekomimi.nekogram.NekoConfig;
@@ -167,6 +173,76 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
             .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
             .makeRed(AlertDialog.BUTTON_POSITIVE)
             .show()));
+    // --- AliGram: preserved-media storage (per-chat opt-ins stay enabled;
+    // only the stored copies are deleted).
+    private final AbstractConfigCell clearPreservedMediaRow = cellGroup.appendCell(new ConfigCellTextCheckIcon(null, "AliGramPreservedStorage", null, "...", R.drawable.msg_clear, false, () -> new AlertDialog.Builder(getContext(), getResourceProvider())
+            .setTitle(getString(R.string.AliGramPreservedStorage))
+            .setMessage(getString(R.string.AliGramPreservedStorageAbout) + "\n\n" + getString(R.string.AliGramClearPreservedConfirm))
+            .setPositiveButton(getString(R.string.Clear), (dialog, which) -> {
+                AlertDialog progressDialog = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
+                progressDialog.setCanCancel(false);
+                progressDialog.show();
+                Utilities.globalQueue.postRunnable(() -> {
+                    AliGramPreservation.clearPreservedStorage(currentAccount);
+                    AndroidUtilities.runOnUIThread(() -> {
+                        progressDialog.dismiss();
+                        BulletinFactory.of(this).createSimpleBulletin(R.raw.done, getString(R.string.AliGramPreservedCleared)).show();
+                    });
+                    loadAliGramPreservedSize();
+                });
+            })
+            .setNegativeButton(getString(R.string.Cancel), (d, w) -> d.dismiss())
+            .makeRed(AlertDialog.BUTTON_POSITIVE)
+            .show()));
+    // --- AliGram: adjustable preservation limits. Defaults reproduce
+    // today's caps (video 10 MiB mobile / 15 MiB Wi-Fi, documents 1 MiB /
+    // 3 MiB, 25 files / 500 MiB per chat); nothing changes until the user
+    // touches a row. The custom video value wins over the preset when
+    // valid (1..100); empty means unset.
+    private final AbstractConfigCell headerAliGramLimits = cellGroup.appendCell(new ConfigCellHeader("AliGram"));
+    private final AbstractConfigCell aliGramVideoCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramVideoCapMb(), new String[]{
+            "Default (10 MB mobile / 15 MB Wi-Fi)",
+            "10 MB",
+            "15 MB",
+            "25 MB",
+            "50 MB",
+            "75 MB",
+            "100 MB",
+    }, new int[]{0, 10, 15, 25, 50, 75, 100}, null));
+    private final AbstractConfigCell aliGramVideoCapCustomRow = cellGroup.appendCell(new ConfigCellTextInput(null, NaConfig.INSTANCE.getAliGramVideoCapCustomMb(), "1–100", null,
+            raw -> raw == null ? "" : raw.trim(),
+            (raw, checked) -> {
+                if (checked == null || checked.isEmpty()) {
+                    return false; // empty = unset
+                }
+                try {
+                    int v = Integer.parseInt(checked);
+                    return v < 1 || v > 100;
+                } catch (NumberFormatException e) {
+                    return true;
+                }
+            }));
+    private final AbstractConfigCell aliGramDocCapRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramDocCapMb(), new String[]{
+            "Default (1 MB mobile / 3 MB Wi-Fi)",
+            "1 MB",
+            "3 MB",
+            "5 MB",
+            "10 MB",
+            "25 MB",
+            "50 MB",
+    }, new int[]{0, 1, 3, 5, 10, 25, 50}, null));
+    private final AbstractConfigCell aliGramMaxFilesRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramMaxFilesPerChat(), new String[]{
+            "10",
+            "25",
+            "50",
+            "100",
+    }, new int[]{10, 25, 50, 100}, null));
+    private final AbstractConfigCell aliGramBudgetRow = cellGroup.appendCell(new ConfigCellSelectBox(null, NaConfig.INSTANCE.getAliGramBudgetMbPerChat(), new String[]{
+            "100 MB",
+            "250 MB",
+            "500 MB",
+            "1000 MB",
+    }, new int[]{100, 250, 500, 1000}, null));
     private final AbstractConfigCell dividerAyuMoments = cellGroup.appendCell(new ConfigCellDivider());
 
     // N-Config
@@ -216,6 +292,7 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
         AyuData.loadSizes(this);
+        loadAliGramPreservedSize();
         return true;
     }
 
@@ -564,6 +641,45 @@ public class NekoExperimentalSettingsActivity extends BaseNekoXSettingsActivity 
         if (listAdapter != null) {
             ((ConfigCellTextCheckIcon) clearMessageDatabaseRow).setValue(AyuData.totalSize > 0 ? AndroidUtilities.formatFileSize(AyuData.totalSize) : "...");
             listAdapter.notifyItemChanged(cellGroup.rows.indexOf(clearMessageDatabaseRow));
+        }
+    }
+
+    private void loadAliGramPreservedSize() {
+        Utilities.globalQueue.postRunnable(() -> {
+            long[] stats = AliGramPreservation.getPreservedStats(currentAccount);
+            // --- AliGram hidden folders: the aggregate row shows only a
+            // count (no names), but that count must still exclude hidden
+            // dialogs while locked. Per-dialog figures come from
+            // getPreservedStatsForDialog ({refs, blobs, bytes}); the
+            // aggregate's [0] is the opted-in chat count, so a hidden
+            // opted-in dialog subtracts 1 there. Note the shared-blob
+            // caveat: blobs/bytes shared between dialogs are counted once
+            // in the total, so the filtered total is exact only when a
+            // blob belongs to a single dialog; the core helper clamps at 0.
+            if (!AliGramHiddenFolders.isUnlocked(currentAccount) && !AliGramHiddenFolders.hiddenFilterIds(currentAccount).isEmpty()) {
+                Map<Long, long[]> perDialog = new HashMap<>();
+                Set<Long> hidden = new HashSet<>();
+                for (long dialogId : AliGramPreservation.optedInDialogIds(currentAccount)) {
+                    if (AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId)) {
+                        hidden.add(dialogId);
+                        long[] s = AliGramPreservation.getPreservedStatsForDialog(currentAccount, dialogId);
+                        perDialog.put(dialogId, new long[]{1, s[1], s[2]});
+                    }
+                }
+                stats = AliGramHiddenFolders.filterPreservedStats(stats, perDialog, hidden);
+            }
+            // stats is reassigned above when filtering, so it is not
+            // effectively final — capture a final copy for the lambda.
+            final long[] displayStats = stats;
+            AndroidUtilities.runOnUIThread(() -> refreshAliGramPreservedSize(displayStats), 500);
+        });
+    }
+
+    public void refreshAliGramPreservedSize(long[] stats) {
+        if (listAdapter != null) {
+            String value = stats[0] + " · " + AndroidUtilities.formatFileSize(stats[2]);
+            ((ConfigCellTextCheckIcon) clearPreservedMediaRow).setValue(value);
+            listAdapter.notifyItemChanged(cellGroup.rows.indexOf(clearPreservedMediaRow));
         }
     }
 

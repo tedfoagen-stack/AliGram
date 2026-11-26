@@ -276,7 +276,16 @@ public class ApplicationLoader extends Application {
         NekoConfig.init();
         NaConfig.init();
         SharedPrefsHelper.init(applicationContext);
-        FirebaseCrashlytics.getInstance().setCrashlyticsCollectionEnabled(AndroidUtil.shouldEnableCrashlytics());
+        // AliGram: no Firebase project is configured for app.aligram yet
+        // (see the build.gradle note), so there may be no default FirebaseApp
+        // and getInstance() throws IllegalStateException. Crashlytics is
+        // inert until a real Firebase project is added; never let it crash
+        // app startup.
+        try {
+            FirebaseCrashlytics.getInstance().setCrashlyticsCollectionEnabled(AndroidUtil.shouldEnableCrashlytics());
+        } catch (IllegalStateException e) {
+            FileLog.e(e);
+        }
         for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) { //TODO improve account
             UserConfig.getInstance(a).loadConfig();
             MessagesController.getInstance(a);

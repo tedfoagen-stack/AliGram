@@ -1,0 +1,188 @@
+name: AliGram Build
+
+# AliGram Phase 3: build the feature branch (tag-1260 baseline + the
+# AliGram media-preservation feature) and run the deterministic JVM unit
+# tests first. Derived from upstream .github/workflows/pr.yml (same
+# checkout/JDK/Gradle/SDK/sed/assembleDebug steps); only the triggers,
+# the test step and the artifact name differ. Step 1 proved the
+# unmodified baseline green on this workflow; the test step also
+# compiles the main source set (Room schema + annotation processing).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/aligram-media-preservation
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  build:
+    name: Gradle Build (feature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      NATIVE_TARGET: "arm64-v8a"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Set up Android SDK Tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
+      - name: Configure Android SDK Path
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+      - name: Modify Gradle JVM Args
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+          echo "Detected memory size: ${MEMORY_GB}GB"
+          if [ $MEMORY_GB -ge 12 ]; then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
+          fi
+          cat gradle.properties
+      - name: Write google-services.json from CI secret
+        # AliGram R1 (FCM): google-services.json is a GitHub Actions
+        # secret (GOOGLE_SERVICES_JSON), NEVER committed to the repo. The
+        # committed file stays upstream's (nu.gpu.nagram, project
+        # nagram-x); CI overwrites it with Ali's app.aligram client
+        # (project aligram-41bad) before the build, so the google-services
+        # plugin generates the right Firebase resources. Fail fast if the
+        # secret is missing, and validate the JSON without printing any
+        # values (only the package_name assertion is ever shown).
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SERVICES_JSON:-}" ]; then
+            echo "FAIL: GOOGLE_SERVICES_JSON secret is empty or missing. Create the repository secret (Settings -> Secrets and variables -> Actions -> GOOGLE_SERVICES_JSON) with the app.aligram google-services.json content, then re-run."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON" > TMessagesProj/google-services.json
+          python3 - <<'EOF'
+          import json
+          with open("TMessagesProj/google-services.json", encoding="utf-8") as f:
+              data = json.load(f)
+          clients = data.get("client", [])
+          assert len(clients) == 1, "expected exactly 1 client, got %d" % len(clients)
+          pkg = clients[0].get("client_info", {}).get("android_client_info", {}).get("package_name")
+          assert pkg == "app.aligram", "unexpected package_name: %r" % (pkg,)
+          print("OK: google-services.json is valid JSON with a single app.aligram client.")
+          EOF
+      - name: Write release keystore from CI secret
+        # AliGram private release signing (2026-11-21): fresh AliGram-only
+        # keystore, kept as the RELEASE_KEYSTORE_BASE64 GitHub Actions
+        # secret, NEVER committed to the repo. CI decodes it to
+        # TMessagesProj/release.keystore (CI workspace only), overwriting
+        # the tracked upstream file. Fail fast if the secret is missing.
+        # Passwords come from KEYSTORE_PASS / ALIAS_NAME / ALIAS_PASS
+        # secrets (see build.gradle: env takes precedence over
+        # LOCAL_PROPERTIES). No secret value is ever printed.
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_KEYSTORE_BASE64:-}" ]; then
+            echo "FAIL: RELEASE_KEYSTORE_BASE64 secret is empty or missing."
+            exit 1
+          fi
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > TMessagesProj/release.keystore
+          test -s TMessagesProj/release.keystore
+          echo "OK: release keystore written (size $(stat -c%s TMessagesProj/release.keystore) bytes)."
+      - name: Unit Tests
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
+          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+        run: |
+          export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+          export DEBUG_BUILD=true
+          ./gradlew TMessagesProj:testDebugUnitTest
+      - name: Debug Build
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
+          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+        run: |
+          export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+          export DEBUG_BUILD=true
+          ./gradlew TMessagesProj:assembleDebug
+
+          APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
+          APK=$(dirname $APK)
+          echo "APK=$APK" >> $GITHUB_ENV
+      - name: Verify release signature and versionCode
+        # The debug APK must be signed with the AliGram release key
+        # (SHA-256 fingerprint below) and carry the versionCode declared
+        # in TMessagesProj/build.gradle (the single source of truth), so
+        # it installs over the previous release-signed build. The
+        # expected versionCode is read from build.gradle at CI time —
+        # never hardcoded here — so a version bump can never drift out
+        # of sync with this check again, regardless of commit order.
+        # apksigner is in the Android SDK build-tools installed above.
+        run: |
+          set -euo pipefail
+          APK_FILE=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk' | head -n 1)
+          echo "APK: $APK_FILE"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK_FILE" | tee /tmp/apksigner.txt
+          grep -q "071609fd4afaa1d5ceda8da20f8bea0d404d41e32b0934448c3f8b9108a3fd88" /tmp/apksigner.txt
+          echo "OK: APK signed with AliGram release key."
+          EXPECTED_VERCODE=$(grep -E 'def verCode = [0-9]+' TMessagesProj/build.gradle | grep -oE '[0-9]+' | head -n 1)
+          if [ -z "$EXPECTED_VERCODE" ]; then echo "ERROR: could not read verCode from TMessagesProj/build.gradle"; exit 1; fi
+          echo "Expected versionCode (from build.gradle): $EXPECTED_VERCODE"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK_FILE" | tee /tmp/badging.txt | grep -E "package: name='app.aligram' versionCode='$EXPECTED_VERCODE'"
+          echo "OK: package app.aligram, versionCode $EXPECTED_VERCODE."
+      - name: Crashlytics mapping-upload guard
+        # Phase 3.2 (§11.7): prove the debug build never uploads a
+        # Crashlytics mapping. The dry-run lists every task that would
+        # execute; the upload task must not be among them. The second
+        # command documents which Crashlytics tasks exist at all.
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          ALIAS_NAME: ${{ secrets.ALIAS_NAME }}
+          ALIAS_PASS: ${{ secrets.ALIAS_PASS }}
+        run: |
+          set -euo pipefail
+          ./gradlew TMessagesProj:assembleDebug --dry-run > /tmp/aligram-dryrun.txt
+          if grep -q "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt; then
+            echo "FAIL: Crashlytics mapping upload task is in the debug build graph:"
+            grep "uploadCrashlyticsMappingFile" /tmp/aligram-dryrun.txt
+            exit 1
+          fi
+          echo "OK: no Crashlytics mapping-upload task in the debug build graph."
+          ./gradlew TMessagesProj:tasks --all | grep -i "crashlytics" || echo "No Crashlytics tasks registered."
+      - name: Collect Room generated sources
+        # Phase 3.2 (§11.6): surface Room's generated DAO code so the
+        # claimJobsForFile @Transaction wrapping can be read directly.
+        # Runs even when the tests fail: the generated sources are the
+        # evidence for diagnosing a red run.
+        if: always()
+        run: |
+          echo "Room-generated DAO implementations for the AliGram package:"
+          find TMessagesProj/build/generated -name '*Dao_Impl.java' -path '*aligram*' -print || true
+      - name: Upload Room generated sources
+        # if: always() so a red test run still uploads the generated
+        # sources (the compile that produced them ran before the tests).
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: AliGram-Room-Generated
+          path: TMessagesProj/build/generated/ap_generated_sources/**/com/radolyn/ayugram/aligram/*Dao_Impl.java
+          if-no-files-found: warn
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: AliGram-Debug
+          path: ${{ env.APK }}

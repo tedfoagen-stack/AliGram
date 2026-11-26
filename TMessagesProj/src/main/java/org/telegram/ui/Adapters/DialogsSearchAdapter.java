@@ -32,6 +32,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import org.telegram.PhoneFormat.PhoneFormat;
 import org.telegram.SQLite.SQLiteCursor;
 import org.telegram.SQLite.SQLitePreparedStatement;
+import com.radolyn.ayugram.aligram.AliGramHiddenFolders;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.ContactsController;
@@ -284,7 +285,32 @@ public class DialogsSearchAdapter extends RecyclerListView.SelectionAdapter {
         }
     }
 
+    // --- AliGram hidden folders: display-layer only. Never hide Saved
+    // Messages (self) or the Replies pseudo-dialog.
+    private boolean aliGramIsHidden(long dialogId) {
+        if (dialogId == UserConfig.getInstance(currentAccount).clientUserId || UserObject.isReplyUser(dialogId)) {
+            return false;
+        }
+        return AliGramHiddenFolders.isDialogHidden(currentAccount, dialogId);
+    }
+
     private boolean filter(Object obj) {
+        // --- AliGram hidden folders: hidden dialogs never appear in local
+        // results, recent searches, or server results (the search helper
+        // calls this filter before adding global/local-server hits).
+        if (obj instanceof TLRPC.User) {
+            if (aliGramIsHidden(((TLRPC.User) obj).id)) {
+                return false;
+            }
+        } else if (obj instanceof TLRPC.Chat) {
+            if (aliGramIsHidden(-((TLRPC.Chat) obj).id)) {
+                return false;
+            }
+        } else if (obj instanceof TLRPC.EncryptedChat) {
+            if (aliGramIsHidden(DialogObject.makeEncryptedDialogId(((TLRPC.EncryptedChat) obj).id))) {
+                return false;
+            }
+        }
         if (dialogsType != DialogsActivity.DIALOGS_TYPE_START_ATTACH_BOT) {
             return true;
         }
@@ -626,6 +652,11 @@ public class DialogsSearchAdapter extends RecyclerListView.SelectionAdapter {
                         for (int a = 0; a < res.messages.size(); a++) {
                             TLRPC.Message message = res.messages.get(a);
                             long did = MessageObject.getDialogId(message);
+                            // --- AliGram hidden folders: never show global
+                            // search hits from a hidden dialog while locked.
+                            if (aliGramIsHidden(did)) {
+                                continue;
+                            }
                             int maxId = MessagesController.getInstance(currentAccount).deletedHistory.get(did);
                             if (maxId != 0 && message.id <= maxId) {
                                 continue;
@@ -1131,7 +1162,15 @@ public class DialogsSearchAdapter extends RecyclerListView.SelectionAdapter {
                         final TLRPC.TL_contacts_sponsoredPeers r = (TLRPC.TL_contacts_sponsoredPeers) res;
                         MessagesController.getInstance(currentAccount).putUsers(r.users, true);
                         MessagesController.getInstance(currentAccount).putChats(r.chats, true);
-                        sponsoredPeers.addAll(r.peers);
+                        // --- AliGram hidden folders: sponsored peers for a
+                        // hidden dialog are dropped at merge (the server
+                        // cannot be told about a local hidden set).
+                        for (int a = 0; a < r.peers.size(); a++) {
+                            TLRPC.TL_sponsoredPeer peer = r.peers.get(a);
+                            if (peer != null && peer.peer != null && !aliGramIsHidden(DialogObject.getPeerDialogId(peer.peer))) {
+                                sponsoredPeers.add(peer);
+                            }
+                        }
                         notifyDataSetChanged();
                     }
                 }));
