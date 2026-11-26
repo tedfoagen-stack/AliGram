@@ -545,4 +545,41 @@ public class AliGramHiddenFoldersTest {
         assertTrue(AliGramHiddenFolders.commitSetup(ACC2, "4321"));
         assertTrue(AliGramHiddenFolders.matchesCode(ACC2, "4321"));
     }
+
+    // ------------------------------------------------------------------
+    // Extra: auto-return to main after the exact-code toggle only
+    // ------------------------------------------------------------------
+    @Test
+    public void shouldDismissSearchOnlyForExactCodeToggle() {
+        // Exact code + toggle consumed → dismiss search, return to main.
+        assertTrue(AliGramHiddenFolders.shouldDismissSearch("1234", true));
+        assertTrue(AliGramHiddenFolders.shouldDismissSearch("123456", true));
+        // ## first-time setup never dismisses: the commit is debounced and
+        // the field is cleared later by the setup-clear runnable.
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("##1234", false));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("##123456", false));
+        // Ordinary search text never dismisses (toggle did not consume it).
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("1234", false));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("hello", false));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("", false));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch(null, false));
+        // Defensive: a toggle claim on non-code text never dismisses.
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("123", true));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("1234567", true));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch("##1234", true));
+        assertFalse(AliGramHiddenFolders.shouldDismissSearch(null, true));
+    }
+
+    @Test
+    public void toggleThenDismissEndToEnd() {
+        // Full intercept flow: typing the exact code toggles the lock AND
+        // the UI dismisses search; typing it again re-locks AND dismisses.
+        assertTrue(AliGramHiddenFolders.setupCode(ACC, "1234"));
+        assertTrue(AliGramHiddenFolders.handleSearchText(ACC, "1234"));
+        assertTrue(AliGramHiddenFolders.isUnlocked(ACC));
+        assertTrue(AliGramHiddenFolders.shouldDismissSearch("1234", true));
+        assertTrue(AliGramHiddenFolders.handleSearchText(ACC, "1234"));
+        assertFalse(AliGramHiddenFolders.isUnlocked(ACC));
+        assertTrue(AliGramHiddenFolders.shouldDismissSearch("1234", true));
+    }
 }
