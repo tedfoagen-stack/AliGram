@@ -582,4 +582,37 @@ public class AliGramHiddenFoldersTest {
         assertFalse(AliGramHiddenFolders.isUnlocked(ACC));
         assertTrue(AliGramHiddenFolders.shouldDismissSearch("1234", true));
     }
+
+    @Test
+    public void dismissActionUsesFragmentSearchFieldCollapse() {
+        // Regression test for the 1262 bug: the exact-code toggle unlocked
+        // the folders but the app stayed in search showing "no results
+        // found", because the branch called closeSearching() — a no-op in
+        // the FragmentSearchField flow (actionBar.isSearchFieldVisible()
+        // is never set there: the ActionBar search item is hidden, its
+        // click listener replaced, zero openSearch() calls). The dismiss
+        // MUST resolve to collapsing the search through the
+        // FragmentSearchField watcher, never to the ActionBar
+        // close-search path. There is no CLOSE_SEARCHING action to
+        // return by design: the no-op mechanism cannot be expressed.
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.COLLAPSE_SEARCH_FIELD,
+                AliGramHiddenFolders.dismissAction("1234", true));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.COLLAPSE_SEARCH_FIELD,
+                AliGramHiddenFolders.dismissAction("123456", true));
+        // ## setup and ordinary text resolve to no dismiss at all.
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("##1234", true));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("##1234", false));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("hello", false));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("1234", false));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("123", true));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction(null, true));
+        assertEquals(AliGramHiddenFolders.SearchDismissAction.NONE,
+                AliGramHiddenFolders.dismissAction("", false));
+    }
 }
