@@ -123,12 +123,14 @@ public final class AliGramHiddenFolders {
     private static final int SALT_BYTES = 16;
 
     // --- Persistent keys: innocuous, no hidden/hide/lock/code substring ---
+    // Strings owned by AliGramExportKeys (single source of truth — the
+    // settings-export filter reads them from there, so they must not drift).
     /** Per-filter hidden flag, suffixed with the SERVER filter id. */
-    static final String KEY_OPT_PREFIX = "ayuFolderOpt_";
+    static final String KEY_OPT_PREFIX = AliGramExportKeys.HIDDEN_FOLDER_OPT_PREFIX;
     /** Salted SHA-256 hex of the code. Never the plaintext code. */
-    static final String KEY_HASH = "ayuFolderKeyHash";
+    static final String KEY_HASH = AliGramExportKeys.HIDDEN_FOLDER_KEY_HASH;
     /** 16-byte salt, hex-encoded. */
-    static final String KEY_SALT = "ayuFolderKeySalt";
+    static final String KEY_SALT = AliGramExportKeys.HIDDEN_FOLDER_KEY_SALT;
 
     private static final Pattern CODE_PATTERN = Pattern.compile("^\\d{4,6}$");
     private static final Pattern SETUP_PATTERN = Pattern.compile("^##\\d{4,6}$");
@@ -631,6 +633,20 @@ public final class AliGramHiddenFolders {
             unlock(account);
         }
         return true;
+    }
+
+    /**
+     * Whether the search UI should be dismissed after intercepting this
+     * text — auto-return to the main dialogs interface. ONLY the exact-code
+     * lock toggle dismisses: the toggle fires solely on a 4–6 digit exact
+     * code match ({@link #handleSearchText} returning true), so
+     * {@code toggleHandled == true} with a code-shaped text is the one
+     * dismiss case. The {@code ##} first-time setup path never dismisses
+     * (its commit is debounced 1000 ms and the field is cleared later by
+     * the setup-clear runnable), and ordinary search text never dismisses.
+     */
+    public static boolean shouldDismissSearch(String text, boolean toggleHandled) {
+        return toggleHandled && text != null && CODE_PATTERN.matcher(text).matches();
     }
 
     // ==================================================================
