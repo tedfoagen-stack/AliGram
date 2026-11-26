@@ -58,10 +58,12 @@ public final class AliGramPreservation {
     private static final String TAG = "AliGram";
 
     // --- Per-account SharedPreferences keys (signed dialog id, never abs()) ---
-    private static final String KEY_FLAG_PREFIX = "ayuPreserveMedia_";
-    private static final String KEY_SINCE_PREFIX = "ayuPreserveMediaSince_";
-    private static final String KEY_STATE_PREFIX = "ayuPreserveMediaState_";
-    private static final String KEY_DEVICE_TIME_PREFIX = "ayuPreserveMediaDeviceTime_";
+    // Strings owned by AliGramExportKeys (single source of truth — the
+    // settings-export filter reads them from there, so they must not drift).
+    private static final String KEY_FLAG_PREFIX = AliGramExportKeys.PRESERVE_FLAG_PREFIX;
+    private static final String KEY_SINCE_PREFIX = AliGramExportKeys.PRESERVE_SINCE_PREFIX;
+    private static final String KEY_STATE_PREFIX = AliGramExportKeys.PRESERVE_STATE_PREFIX;
+    private static final String KEY_DEVICE_TIME_PREFIX = AliGramExportKeys.PRESERVE_DEVICE_TIME_PREFIX;
     /**
      * PENDING-window fix (2026-11-21): server-time estimate recorded when
      * preservation is enabled (best effort, {@code getCurrentTime()}).
@@ -71,7 +73,7 @@ public final class AliGramPreservation {
      * enable-moment estimate instead (see
      * {@link AliGramEligibility#effectiveActivationTime}).
      */
-    private static final String KEY_ENABLE_SERVER_PREFIX = "ayuPreserveMediaEnableServer_";
+    private static final String KEY_ENABLE_SERVER_PREFIX = AliGramExportKeys.PRESERVE_ENABLE_SERVER_PREFIX;
     private static final String STATE_PENDING = "PENDING";
     private static final String STATE_STAMPED = "STAMPED";
     private static final String STATE_OFF = "OFF";
@@ -680,6 +682,16 @@ public final class AliGramPreservation {
                 }
             });
         }
+        // Periodic completeness verification (hourly missed-message sweep):
+        // starts once per process per account, alongside startup reconcile.
+        // The sweep itself is the scan; this only adds the timer. A killed
+        // process gets its sweep at the next startup reconcile anyway.
+        try {
+            AliGramPeriodicVerify.start(account, AliGramPreservation::sweepMissedMessages,
+                    AliGramPreservation::isRoaming);
+        } catch (Throwable e) {
+            FileLog.e(TAG + ": periodic verify start failed", e);
+        }
         return true;
     }
 
@@ -1046,7 +1058,8 @@ public final class AliGramPreservation {
                     if (!isOptedIn(account, dialogId)) {
                         continue;
                     }
-                    if (dao.getLiveRef(userId, dialogId, messageId) != null) {
+                    if (!AliGramPeriodicVerify.needsVerification(
+                            dao.getLiveRef(userId, dialogId, messageId) != null)) {
                         continue; // already preserved — the sweep's replacement for preExistingRow
                     }
                     TLRPC.Message message = MessagesStorage.getInstance(account).getMessage(dialogId, messageId);
