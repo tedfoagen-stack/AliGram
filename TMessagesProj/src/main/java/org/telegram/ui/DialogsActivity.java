@@ -3504,8 +3504,21 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                     // the main dialogs interface. The ## first-time setup
                     // path never reaches here (debounced commit; the field
                     // is cleared later by aliGramScheduleSetupClear).
-                    if (AliGramHiddenFolders.shouldDismissSearch(text, aliGramToggled)) {
-                        closeSearching();
+                    // NOTE: do NOT call closeSearching() here — it is a
+                    // no-op in this flow: it only acts when
+                    // actionBar.isSearchFieldVisible(), and that flag is
+                    // never set for the FragmentSearchField search (the
+                    // ActionBar search item is hidden, its click listener
+                    // replaced, zero openSearch() calls), so the 1262
+                    // build unlocked but stayed in search showing
+                    // "no results found". Collapse the search the same
+                    // way the X button does: hide keyboard, clear focus,
+                    // fragmentSearchFieldWatcher.toggleSearch(false) ->
+                    // onSearchCollapse() -> showSearch(false, ...).
+                    if (AliGramHiddenFolders.dismissAction(text, aliGramToggled) == AliGramHiddenFolders.SearchDismissAction.COLLAPSE_SEARCH_FIELD) {
+                        AndroidUtilities.hideKeyboard(fragmentSearchField.editText);
+                        fragmentSearchField.editText.clearFocus();
+                        fragmentSearchFieldWatcher.toggleSearch(false);
                     }
                     return;
                 }
