@@ -3495,10 +3495,18 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 // search, so neither the code nor a ## setup ever becomes a
                 // server query or a recent-search row, and nothing is shown.
                 AliGramHiddenFolders.onSetupTextChanged(currentAccount, text);
-                if (AliGramHiddenFolders.handleSearchText(currentAccount, text)) {
+                boolean aliGramToggled = AliGramHiddenFolders.handleSearchText(currentAccount, text);
+                if (aliGramToggled) {
                     editText.getText().clear();
                     aliGramWasUnlocked = AliGramHiddenFolders.isUnlocked(currentAccount);
                     aliGramRefreshAfterLockChange();
+                    // Exact-code toggle only: dismiss search and return to
+                    // the main dialogs interface. The ## first-time setup
+                    // path never reaches here (debounced commit; the field
+                    // is cleared later by aliGramScheduleSetupClear).
+                    if (AliGramHiddenFolders.shouldDismissSearch(text, aliGramToggled)) {
+                        closeSearching();
+                    }
                     return;
                 }
                 if (!AliGramHiddenFolders.hasCodeSet(currentAccount) && AliGramHiddenFolders.isSetupCandidate(text)) {
