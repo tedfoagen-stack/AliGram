@@ -649,6 +649,36 @@ public final class AliGramHiddenFolders {
         return toggleHandled && text != null && CODE_PATTERN.matcher(text).matches();
     }
 
+    /**
+     * Which UI action collapses the search after intercepting this text.
+     *
+     * <p>The exact-code toggle must collapse the search through the
+     * FragmentSearchField watcher ({@code COLLAPSE_SEARCH_FIELD}) — the
+     * same path the search field's X button uses
+     * ({@code fragmentSearchFieldWatcher.toggleSearch(false)} →
+     * {@code onSearchCollapse()} → {@code showSearch(false, ...)}).
+     * It must NOT use {@code DialogsActivity.closeSearching()}: that
+     * helper only acts when {@code actionBar.isSearchFieldVisible()},
+     * and that flag is never set for the FragmentSearchField search
+     * (the ActionBar search item is hidden, its click listener replaced,
+     * zero {@code openSearch()} calls), so closeSearching() is a
+     * guaranteed no-op in exactly this flow — the 1262 bug (unlock
+     * worked, search stayed open showing "no results found"). There is
+     * deliberately no CLOSE_SEARCHING value: the no-op mechanism cannot
+     * be expressed, so the regression cannot be reintroduced through
+     * this decision.
+     */
+    public enum SearchDismissAction {
+        /** Do not dismiss search (ordinary text, ## setup, no toggle). */
+        NONE,
+        /** Collapse via the FragmentSearchField watcher. */
+        COLLAPSE_SEARCH_FIELD
+    }
+
+    public static SearchDismissAction dismissAction(String text, boolean toggleHandled) {
+        return shouldDismissSearch(text, toggleHandled) ? SearchDismissAction.COLLAPSE_SEARCH_FIELD : SearchDismissAction.NONE;
+    }
+
     // ==================================================================
     // Hidden filters (persistent, keyed by SERVER filter id)
     // ==================================================================
