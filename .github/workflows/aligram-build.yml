@@ -125,7 +125,7 @@ jobs:
           echo "APK=$APK" >> $GITHUB_ENV
       - name: Verify release signature and versionCode
         # The debug APK must be signed with the AliGram release key
-        # (SHA-256 fingerprint below) and carry versionCode 1262, so it
+        # (SHA-256 fingerprint below) and carry versionCode 1263, so it
         # installs over the previous release-signed build. apksigner is
         # in the Android SDK build-tools installed above.
         run: |
@@ -135,8 +135,8 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK_FILE" | tee /tmp/apksigner.txt
           grep -q "071609fd4afaa1d5ceda8da20f8bea0d404d41e32b0934448c3f8b9108a3fd88" /tmp/apksigner.txt
           echo "OK: APK signed with AliGram release key."
-          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK_FILE" | grep -E "package: name='app.aligram' versionCode='1262'" 
-          echo "OK: package app.aligram, versionCode 1262."
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK_FILE" | grep -E "package: name='app.aligram' versionCode='1263'" 
+          echo "OK: package app.aligram, versionCode 1263."
       - name: Crashlytics mapping-upload guard
         # Phase 3.2 (§11.7): prove the debug build never uploads a
         # Crashlytics mapping. The dry-run lists every task that would
